@@ -1,0 +1,104 @@
+#!/usr/bin/env node
+// IP-leak verifier for @skew-labs/sdk.
+//
+// The SDK ships the Anchor IDL plus generated TypeScript bindings. Field
+// NAMES are part of the on-chain layout and cannot be renamed without
+// breaking the protocol contract — those are explicitly allowed.
+//
+// What we DO block: human-readable commentary that references the
+// off-chain pricing engine's internal estimator framework — calibration
+// methods, rejected estimators, internal spec sections, Phase identifiers.
+// Those leak via Anchor's `docs` arrays. `strip_idl.mjs` removes them
+// before publish; this script is the post-condition gate.
+
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, extname, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const ROOT = join(__dirname, "..");
+
+// Forbidden human-readable strings. Field names like `sigma_t_micro` are
+// intentionally NOT in this list — they're protocol-level names, public.
+const FORBIDDEN = [
+  "POT-GPD",
+  "Yang-Zhang",
+  "Yang–Zhang",
+  "RiskMetrics",
+  "GARCH",
+  "Hansen-Lunde",
+  "Hansen–Lunde",
+  "Phase 1",
+  "phase_1",
+  "master paper",
+  "spec §",
+  "AGENT-PROTOCOL",
+  "Iron Law",
+  "DISPROVEN",
+];
+
+const AUDIT_DIRS = ["dist", "src", "idl", "README.md", "package.json"];
+const EXCLUDE = [
+  join("scripts", "verify_no_leak.mjs"),
+  join("scripts", "strip_idl.mjs"),
+];
+
+const TEXT_EXT = new Set([
+  ".js", ".mjs", ".cjs", ".ts", ".tsx", ".json", ".md", ".map",
+]);
+
+function walk(p) {
+  const out = [];
+  try {
+    const stat = statSync(p);
+    if (stat.isFile()) {
+      out.push(p);
+      return out;
+    }
+    if (!stat.isDirectory()) return out;
+    for (const name of readdirSync(p)) out.push(...walk(join(p, name)));
+  } catch { /* ignore */ }
+  return out;
+}
+
+function isExcluded(rel) {
+  return EXCLUDE.some((e) => rel.endsWith(e) || rel === e);
+}
+
+let totalHits = 0;
+const hits = [];
+
+for (const dir of AUDIT_DIRS) {
+  const abs = join(ROOT, dir);
+  for (const file of walk(abs)) {
+    const rel = file.slice(ROOT.length + 1).replace(/\\/g, "/");
+    if (isExcluded(rel)) continue;
+    if (!TEXT_EXT.has(extname(file))) continue;
+    let content;
+    try { content = readFileSync(file, "utf8"); } catch { continue; }
+    for (const term of FORBIDDEN) {
+      const idx = content.indexOf(term);
+      if (idx !== -1) {
+        const snippet = content
+          .slice(Math.max(0, idx - 40), Math.min(content.length, idx + term.length + 40))
+          .replace(/\n/g, " ");
+        hits.push({ file: rel, term, snippet });
+        totalHits += 1;
+      }
+    }
+  }
+}
+
+if (totalHits === 0) {
+  console.log("✓ verify_no_leak (sdk): PASS — 0 forbidden terms found");
+  process.exit(0);
+} else {
+  console.error(`✗ verify_no_leak (sdk): FAIL — ${totalHits} forbidden term hits`);
+  for (const hit of hits.slice(0, 50)) {
+    console.error(`  ${hit.file} → "${hit.term}"`);
+    console.error(`    ...${hit.snippet}...`);
+  }
+  if (hits.length > 50) console.error(`  ... ${hits.length - 50} more`);
+  process.exit(1);
+}

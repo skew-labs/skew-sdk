@@ -73,7 +73,7 @@ export interface SkewClientOptions {
  *
  * Construction (one canonical path — `fromProgram`):
  * ```ts
- * import idl from "@skew/sdk/idl/skew_master.json" assert { type: "json" };
+ * import idl from "@skew-labs/sdk/idl/skew_master.json" assert { type: "json" };
  * const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
  * const program  = new Program(idl as any, provider);
  * const skew     = SkewClient.fromProgram(connection, wallet, program);
@@ -116,7 +116,7 @@ export class SkewClient {
    * Load the SDK with a pre-built Program instance — the canonical entry point.
    *
    * @example
-   *   import idl from "@skew/sdk/idl/skew_master.json" assert { type: "json" };
+   *   import idl from "@skew-labs/sdk/idl/skew_master.json" assert { type: "json" };
    *   const program = new Program(idl as any, provider);
    *   const skew    = SkewClient.fromProgram(connection, wallet, program);
    */
@@ -136,7 +136,7 @@ export class SkewClient {
     if (!this.program) {
       throw new Error(
         "SkewClient: Program is not loaded. Use `SkewClient.fromProgram(connection, wallet, program)` " +
-          "after `new Program(idl, provider)`. See @skew/sdk/README for setup.",
+          "after `new Program(idl, provider)`. See @skew-labs/sdk/README for setup.",
       );
     }
     return this.program;
@@ -376,7 +376,7 @@ export class SkewClient {
   }
 
   /**
-   * Register the wallet as a Clearing Member (Phase 1 permissionless).
+   * Register the wallet as a Clearing Member (permissionless).
    *
    * Mirrors anchor `register_clearing_member`. Derives the CM PDA + escrow PDA,
    * computes the authority's USDC ATA, and submits a single transaction. The
@@ -593,7 +593,7 @@ export class SkewClient {
   }
 
   /**
-   * Read-only — invoke `calculate_margin` (master paper §10 PM v1.4) for the
+   * Read-only — invoke `calculate_margin` ( PM v1.4) for the
    * caller's CM and return the IM breakdown. The instruction itself just
    * recomputes + writes the result into the CM PDA; this helper sends the tx
    * then reads the PDA so the caller gets numbers in one call.

@@ -1,0 +1,15 @@
+{
+  "name": "@skew/example-01-buy-vanilla-call",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.31.1",
+    "@skew-labs/sdk": "workspace:*",
+    "@solana/web3.js": "^1.95.3",
+    "tsx": "^4.21.0"
+  }
+}

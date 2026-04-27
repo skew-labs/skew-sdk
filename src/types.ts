@@ -1,7 +1,7 @@
 import type { PublicKey } from "@solana/web3.js";
 
 /**
- * 5-asset Iron Law launch panel (AGENT-PROTOCOL Article 7).
+ * launch list launch panel ().
  * Mirrors anchor `state::asset::Asset` enum (BTC=0, ETH=1, SOL=2, XRP=3, HYPE=4).
  * Other symbols are rejected at the anchor instruction layer.
  */
@@ -121,7 +121,7 @@ export interface SettleResult {
 }
 
 /**
- * Params for `SkewClient.registerClearingMember()`. Phase 1 permissionless —
+ * Params for `SkewClient.registerClearingMember()`. permissionless —
  * no KYC signer required (anchor instruction `register_clearing_member`).
  *
  * Devnet learning floor: $100 (cm-onboard.sh `MIN_RECOMMENDED_USDC`).
@@ -149,7 +149,7 @@ export interface TxResult {
 
 /**
  * Read-only result of `calculate_margin`. Mirrors anchor `MarginCalcResult`
- * (master paper §10 PM v1.4 IM formula breakdown).
+ * ( PM v1.4 IM formula breakdown).
  *
  * NOTE: `calculate_margin` instruction returns void on-chain; result must be
  * retrieved by reading the CM PDA after the (read-only) tx confirms. SDK

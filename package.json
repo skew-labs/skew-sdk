@@ -1,6 +1,6 @@
 {
-  "name": "@skew/sdk",
-  "version": "0.1.0",
+  "name": "@skew-labs/sdk",
+  "version": "0.2.0",
   "description": "TypeScript SDK for Skew — Solana options infrastructure. Create, buy, settle options in five lines.",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -36,11 +36,13 @@
     "./idl/*.json": "./idl/*.json",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "idl", "examples", "README.md", "LICENSE"],
+  "files": ["dist", "idl", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "strip-idl": "node scripts/strip_idl.mjs",
+    "verify:no-leak": "node scripts/verify_no_leak.mjs",
+    "prepublishOnly": "npm run strip-idl && npm run build && npm run verify:no-leak"
   },
   "peerDependencies": {
     "@coral-xyz/anchor": "^0.31.1",

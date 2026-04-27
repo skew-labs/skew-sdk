@@ -1,9 +1,9 @@
-# @skew/sdk
+# @skew-labs/sdk
 
 > **TypeScript SDK for Skew — Solana options infrastructure.**
 > Become a Clearing Member, create, buy, and settle options in five lines.
 
-[![npm](https://img.shields.io/badge/npm-%40skew%2Fsdk-3178c6?style=flat-square&logo=npm)](https://www.npmjs.com/package/@skew/sdk)
+[![npm](https://img.shields.io/badge/npm-%40skew%2Fsdk-3178c6?style=flat-square&logo=npm)](https://www.npmjs.com/package/@skew-labs/sdk)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](../../LICENSE)
 
 ---
@@ -14,15 +14,15 @@
 - **7 payoff names** mapping cleanly onto 3 anchor variants (vanilla as a first-class type)
 - **PDA helpers** for every account a bot might inspect off-chain
 - **Pyth Hermes auto-fetch** for `spot_at_creation` (V0 stamp for Boundary-Aware IM)
-- **IDL re-export** at `@skew/sdk/idl/skew_master.json` — no `target/idl/` walk needed
+- **IDL re-export** at `@skew-labs/sdk/idl/skew_master.json` — no `target/idl/` walk needed
 
 ---
 
 ## Install
 
 ```bash
-pnpm add @skew/sdk @solana/web3.js @coral-xyz/anchor @solana/spl-token
-# or: npm install @skew/sdk @solana/web3.js @coral-xyz/anchor @solana/spl-token
+pnpm add @skew-labs/sdk @solana/web3.js @coral-xyz/anchor @solana/spl-token
+# or: npm install @skew-labs/sdk @solana/web3.js @coral-xyz/anchor @solana/spl-token
 ```
 
 Peer dependencies: `@coral-xyz/anchor ^0.31`, `@solana/web3.js ^1.95`, `@solana/spl-token ^0.4`.
@@ -34,8 +34,8 @@ Peer dependencies: `@coral-xyz/anchor ^0.31`, `@solana/web3.js ^1.95`, `@solana/
 ```typescript
 import { Connection, Keypair } from "@solana/web3.js";
 import { Wallet, AnchorProvider, Program } from "@coral-xyz/anchor";
-import { SkewClient } from "@skew/sdk";
-import idl from "@skew/sdk/idl/skew_master.json" assert { type: "json" };
+import { SkewClient } from "@skew-labs/sdk";
+import idl from "@skew-labs/sdk/idl/skew_master.json" assert { type: "json" };
 
 const conn     = new Connection(process.env.HELIUS_RPC!, "confirmed");
 const kp       = Keypair.fromSecretKey(/* ... */);
@@ -121,7 +121,7 @@ import {
   findClearingMemberPda,
   findCmEscrowPda,
   findFeeAccumulatorPda,
-} from "@skew/sdk";
+} from "@skew-labs/sdk";
 
 const [cmPda] = findClearingMemberPda(wallet.publicKey);
 const account = await connection.getAccountInfo(cmPda);
@@ -210,7 +210,7 @@ Get devnet USDC: <https://spl-token-faucet.com/?token-name=USDC-Dev>
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `SkewClient: Program is not loaded` | bare `new SkewClient(...)` | use `SkewClient.fromProgram(...)` |
-| `Cannot find module '@skew/sdk/idl/skew_master.json'` | bad install | `pnpm install` in workspace root |
+| `Cannot find module '@skew-labs/sdk/idl/skew_master.json'` | bad install | `pnpm install` in workspace root |
 | `Account does not exist` for ATA | USDC ATA never initialized | send any non-zero USDC to the wallet first |
 | `Pyth Hermes feed not yet available for HYPE` | HYPE pre-Wormhole | pass `spotAtCreation` explicitly |
 | Tx reverts with `0x1791` (`Unauthorized`) | caller != authority for an admin op | use the right keypair |

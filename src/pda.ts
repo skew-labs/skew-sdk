@@ -6,7 +6,7 @@ export const SKEW_PROGRAM_ID = new PublicKey(
 );
 
 // ---------------------------------------------------------------------------
-// Pyth devnet feeds (5-asset launch panel, Article 7).
+// Pyth devnet feeds (launch panel).
 // HYPE feed pending Wormhole / Pyth integration (~2026-Q2). Until then,
 // resolvePythFeed("HYPE") falls back to the Pyth Hermes REST API and the
 // instruction is rejected on-chain (UnsupportedAsset).
@@ -45,7 +45,7 @@ export function resolvePythFeed(underlying: Underlying): PublicKey {
 
 /**
  * Map a launch-panel symbol to its anchor `state::asset::Asset` enum index.
- * BTC=0, ETH=1, SOL=2, XRP=3, HYPE=4 (Article 7 5-asset Iron Law).
+ * BTC=0, ETH=1, SOL=2, XRP=3, HYPE=4 (launch list).
  */
 export function assetEnumIndex(underlying: Underlying): number {
   const idx = { BTC: 0, ETH: 1, SOL: 2, XRP: 3, HYPE: 4 }[underlying];
@@ -284,11 +284,11 @@ export function findCmEscrowPda(
 /**
  * Per-asset MicrostructurePDA — multi-venue aggregated spot / spread / depth /
  * volume / 28d ATM IV. Written by SKEW_AUTHORITY via `update_microstructure`
- * every ~60 slots (master paper §29.9).
+ * every ~60 slots .
  *
  * Seeds: [b"microstructure", &[asset_u8]]
  *
- * @param assetIdx — 0=BTC, 1=ETH, 2=SOL, 3=XRP, 4=HYPE (Article 7 5-asset enum).
+ * @param assetIdx — 0=BTC, 1=ETH, 2=SOL, 3=XRP, 4=HYPE (launch enum).
  */
 export function findMicrostructurePda(
   assetIdx: number,
@@ -304,7 +304,7 @@ export function findMicrostructurePda(
 /**
  * Singleton CrossAssetMatrix PDA — 10 ρ_p5 + 10 stress correlation pairs
  * across 5 assets. Written by SKEW_AUTHORITY via `update_cross_asset_matrix`
- * (master paper §10.6 / §18.4 ICC table). Single PDA, no asset index.
+ * ( / §18.4 ICC table). Single PDA, no asset index.
  *
  * Seeds: [b"cross_asset_matrix"]
  */
@@ -316,7 +316,7 @@ export function findCrossAssetMatrixPda(
 
 /**
  * Per-asset HamiltonState PDA — 2-state (calm/stress) regime detection params.
- * Written by SKEW_AUTHORITY via `update_hamilton_state` (master paper §25).
+ * Written by SKEW_AUTHORITY via `update_hamilton_state` .
  * Streams 11 fields per asset (π_calm/π_stress/μ/σ/p01/p10/consecutive days).
  *
  * Seeds: [b"hamilton", &[asset_u8]]
@@ -337,7 +337,7 @@ export function findHamiltonPda(
 /**
  * Per-asset PoVSState PDA — Path-of-Vol-Surface state. σ_t / σ_∞ / θ_d / VRP /
  * IV / p_max / ξ / β / VaR99 / ES999 / regime indicator. Written by
- * SKEW_AUTHORITY via `update_povs_state` (master paper §7-§9).
+ * SKEW_AUTHORITY via `update_povs_state` (§9).
  *
  * Seeds: [b"povs_state", &[asset_u8]]
  *
