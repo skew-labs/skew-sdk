@@ -1,10 +1,32 @@
 {
   "name": "@skew/sdk",
   "version": "0.1.0",
-  "description": "Skew SDK — create, buy, settle options on Solana in three lines",
+  "description": "TypeScript SDK for Skew — Solana options infrastructure. Create, buy, settle options in five lines.",
   "license": "MIT",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "homepage": "https://github.com/skew-labs/skew-sdk",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skew-labs/skew-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/skew-labs/skew/issues"
+  },
+  "keywords": [
+    "solana",
+    "options",
+    "sdk",
+    "anchor",
+    "defi",
+    "skew",
+    "pyth",
+    "occ",
+    "rfq"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,10 +36,11 @@
     "./idl/*.json": "./idl/*.json",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "idl", "examples", "README.md"],
+  "files": ["dist", "idl", "examples", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
     "@coral-xyz/anchor": "^0.31.1",
