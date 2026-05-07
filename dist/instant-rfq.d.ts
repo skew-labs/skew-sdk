@@ -1,6 +1,10 @@
 import { PublicKey, Transaction } from "@solana/web3.js";
 export declare const INSTANT_RFQ_DEFAULT_RELAY_URL = "wss://skew-relay-devnet.fly.dev/subscribe";
 export declare const RELAY_PAYLOAD_LEN: 100;
+export declare class RfqWalletMessageSigningUnsupported extends Error {
+    readonly code = "RFQ_WALLET_MESSAGE_SIGNING_UNSUPPORTED";
+    constructor(cause?: unknown);
+}
 export interface RelayPayload {
     relayNonce: bigint;
     quoteExpiryTs: bigint;
@@ -79,13 +83,29 @@ export declare function collectInstantRfqQuotes(args: {
     relayNonce: bigint;
     quotes: InstantRfqQuote[];
 }>;
-export declare function hitInstantRfqQuote(args: {
+type InstantRfqHitBaseArgs = {
     buyer: PublicKey;
     cmPubkey: PublicKey;
     payload: RelayPayload;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
     signTransaction: (transaction: Transaction) => Promise<Transaction>;
     relayUrl?: string;
     timeoutMs?: number;
+};
+/**
+ * Browser-safe Instant RFQ hit path.
+ *
+ * The buyer does not sign an arbitrary digest. Instead, the relay prepares the
+ * exact atomic_fill_from_relay transaction after the selected CM signs the
+ * payload digest, then the browser wallet signs that transaction normally.
+ */
+export declare function hitInstantRfqQuoteTxSigned(args: InstantRfqHitBaseArgs): Promise<InstantRfqHitResult>;
+/**
+ * Legacy bot/HSM Instant RFQ hit path. Kept for server wallets that can sign a
+ * detached Ed25519 digest. Browser wallets should use
+ * hitInstantRfqQuoteTxSigned to avoid Phantom/Solflare signMessage failures.
+ */
+export declare function hitInstantRfqQuote(args: InstantRfqHitBaseArgs & {
+    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
 }): Promise<InstantRfqHitResult>;
+export {};
 //# sourceMappingURL=instant-rfq.d.ts.map

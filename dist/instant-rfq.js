@@ -1,18 +1,30 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = void 0;
+exports.RfqWalletMessageSigningUnsupported = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = void 0;
 exports.validateInstantRfqLane = validateInstantRfqLane;
 exports.buildRelayPayload = buildRelayPayload;
 exports.encodeRelayPayload = encodeRelayPayload;
 exports.relayPayloadDigest = relayPayloadDigest;
 exports.relayPayloadToJson = relayPayloadToJson;
 exports.collectInstantRfqQuotes = collectInstantRfqQuotes;
+exports.hitInstantRfqQuoteTxSigned = hitInstantRfqQuoteTxSigned;
 exports.hitInstantRfqQuote = hitInstantRfqQuote;
 const web3_js_1 = require("@solana/web3.js");
 const sha256_1 = require("@noble/hashes/sha256");
 const pda_1 = require("./pda");
 exports.INSTANT_RFQ_DEFAULT_RELAY_URL = "wss://skew-relay-devnet.fly.dev/subscribe";
 exports.RELAY_PAYLOAD_LEN = 100;
+class RfqWalletMessageSigningUnsupported extends Error {
+    constructor(cause) {
+        super("This wallet cannot sign arbitrary Solana messages for Instant RFQ. Use hitInstantRfqQuoteTxSigned, which only requires a normal transaction signature.");
+        this.code = "RFQ_WALLET_MESSAGE_SIGNING_UNSUPPORTED";
+        this.name = "RfqWalletMessageSigningUnsupported";
+        if (cause !== undefined) {
+            this.cause = cause;
+        }
+    }
+}
+exports.RfqWalletMessageSigningUnsupported = RfqWalletMessageSigningUnsupported;
 function validateInstantRfqLane(payload) {
     const mint = new web3_js_1.PublicKey(payload.settlementMint);
     const physicalSolSettlement = mint.equals(pda_1.JITOSOL_MINT) || mint.equals(pda_1.NATIVE_SOL_MINT);
@@ -89,6 +101,11 @@ function relayPayloadDigest(payloadOrBytes) {
         throw new Error(`payload must be ${exports.RELAY_PAYLOAD_LEN} bytes, got ${bytes.length}`);
     }
     return (0, sha256_1.sha256)(bytes);
+}
+function exactMessageBytes(bytes) {
+    const out = new Uint8Array(bytes.length);
+    out.set(bytes);
+    return out;
 }
 function relayPayloadToJson(payload) {
     return {
@@ -186,15 +203,51 @@ async function collectInstantRfqQuotes(args) {
         };
     });
 }
+/**
+ * Browser-safe Instant RFQ hit path.
+ *
+ * The buyer does not sign an arbitrary digest. Instead, the relay prepares the
+ * exact atomic_fill_from_relay transaction after the selected CM signs the
+ * payload digest, then the browser wallet signs that transaction normally.
+ */
+async function hitInstantRfqQuoteTxSigned(args) {
+    validateInstantRfqLane(args.payload);
+    return hitInstantRfqQuoteInternal({
+        ...args,
+        kind: "buyer_accept_tx_signed",
+    });
+}
+/**
+ * Legacy bot/HSM Instant RFQ hit path. Kept for server wallets that can sign a
+ * detached Ed25519 digest. Browser wallets should use
+ * hitInstantRfqQuoteTxSigned to avoid Phantom/Solflare signMessage failures.
+ */
 async function hitInstantRfqQuote(args) {
-    const relayUrl = args.relayUrl ?? exports.INSTANT_RFQ_DEFAULT_RELAY_URL;
-    const timeoutMs = args.timeoutMs ?? 30000;
+    if (typeof args.signMessage !== "function") {
+        throw new RfqWalletMessageSigningUnsupported();
+    }
     validateInstantRfqLane(args.payload);
     const digest = relayPayloadDigest(args.payload);
-    const sig = await args.signMessage(digest);
+    let sig;
+    try {
+        sig = await args.signMessage(exactMessageBytes(digest));
+    }
+    catch (cause) {
+        throw new RfqWalletMessageSigningUnsupported(cause);
+    }
     if (sig.length !== 64) {
         throw new Error(`buyer signature must be 64 bytes, got ${sig.length}`);
     }
+    return hitInstantRfqQuoteInternal({
+        ...args,
+        kind: "buyer_accept",
+        buyerSig: sig,
+    });
+}
+async function hitInstantRfqQuoteInternal(args) {
+    const relayUrl = args.relayUrl ?? exports.INSTANT_RFQ_DEFAULT_RELAY_URL;
+    const timeoutMs = args.timeoutMs ?? 30000;
+    validateInstantRfqLane(args.payload);
     return new Promise((resolve, reject) => {
         const ws = new WebSocket(relayUrl);
         const relayNonce = args.payload.relayNonce.toString();
@@ -239,9 +292,9 @@ async function hitInstantRfqQuote(args) {
                 pubkey: args.buyer.toBase58(),
             }));
             ws.send(JSON.stringify({
-                kind: "buyer_accept",
+                kind: args.kind,
                 payload: relayPayloadToJson(args.payload),
-                buyer_sig_b64: bytesToBase64(sig),
+                ...(args.buyerSig ? { buyer_sig_b64: bytesToBase64(args.buyerSig) } : {}),
                 buyer_pubkey: args.buyer.toBase58(),
                 cm_pubkey: args.cmPubkey.toBase58(),
             }));

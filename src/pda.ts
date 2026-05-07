@@ -51,6 +51,133 @@ export function assetEnumIndex(underlying: Underlying): number {
   return idx;
 }
 
+// ---------------------------------------------------------------------------
+// Expiry tenor policy.
+//
+// The on-chain AssetParams validator does not accept arbitrary expiries.
+// Bots should build expiries from these helpers instead of hand-rolling
+// `Date.now() + hours`, especially around the +/-1h boundary.
+// ---------------------------------------------------------------------------
+
+export const STANDARD_TENOR_DAYS = [1, 7, 14, 28, 90] as const;
+export type StandardTenorDays = (typeof STANDARD_TENOR_DAYS)[number];
+export const TENOR_TOLERANCE_SECONDS = 3_600;
+
+export const SKEW_ALLOWED_TENORS_BY_UNDERLYING: Record<
+  Underlying,
+  readonly StandardTenorDays[]
+> = {
+  BTC: [1, 7, 14, 28, 90],
+  ETH: [1, 7, 14, 28, 90],
+  SOL: [1, 7, 14, 28, 90],
+  XRP: [7, 14, 28],
+  HYPE: [1, 7, 14, 28],
+};
+
+export interface AssertExpiryTenorOptions {
+  nowSeconds?: number;
+  context?: string;
+}
+
+function formatDeltaSeconds(deltaSeconds: number): string {
+  if (Math.abs(deltaSeconds) < 72 * 3_600) {
+    return `${(deltaSeconds / 3_600).toFixed(2)}h`;
+  }
+  return `${(deltaSeconds / 86_400).toFixed(2)}d`;
+}
+
+function tenorLabel(days: readonly StandardTenorDays[]): string {
+  return days.map((d) => `${d}d`).join("/");
+}
+
+/**
+ * Return an ISO timestamp exactly N standard tenor days from now.
+ *
+ * Use this in bots instead of `Date.now() + hours`. For example:
+ *
+ * ```ts
+ * const expiry = expiryFromTenorDays(7);
+ * await skew.create({ underlying: "BTC", expiry, ... });
+ * ```
+ */
+export function expiryFromTenorDays(days: StandardTenorDays, nowMs = Date.now()): string {
+  return new Date(Number(expiryTsFromTenorDays(days, nowMs)) * 1000).toISOString();
+}
+
+/**
+ * Return unix seconds exactly N standard tenor days from now.
+ *
+ * This is the safer helper for low-level RFQ structs where Anchor expects
+ * `expiryTs: bigint`. Do not pass `Date.now()` milliseconds to those fields.
+ */
+export function expiryTsFromTenorDays(days: StandardTenorDays, nowMs = Date.now()): bigint {
+  if (!STANDARD_TENOR_DAYS.includes(days)) {
+    throw new Error(`Unsupported Skew tenor: ${days}d`);
+  }
+  const nowSeconds = Math.floor(nowMs / 1000);
+  return BigInt(nowSeconds + days * 86_400);
+}
+
+/**
+ * SDK preflight for the on-chain AssetParams tenor buckets.
+ *
+ * Returns the matched tenor day. Throws before a transaction is built if the
+ * expiry is off-bucket, so bots see a precise SDK error instead of an Anchor
+ * simulation failure such as `6001`.
+ */
+export function assertExpiryTenor(
+  underlyingOrAsset: Underlying | number,
+  expiryTs: bigint | number,
+  options: AssertExpiryTenorOptions = {},
+): StandardTenorDays {
+  const context = options.context ?? "expiry";
+  const underlying =
+    typeof underlyingOrAsset === "number"
+      ? indexToUnderlying(underlyingOrAsset)
+      : underlyingOrAsset;
+  if (!underlying) {
+    throw new Error(`${context}: unsupported asset index ${underlyingOrAsset}`);
+  }
+
+  const expirySeconds = Number(expiryTs);
+  if (!Number.isFinite(expirySeconds) || !Number.isSafeInteger(expirySeconds)) {
+    throw new Error(`${context}: invalid unix expiry seconds ${String(expiryTs)}`);
+  }
+  if (expirySeconds > 10_000_000_000) {
+    throw new Error(
+      `${context}: expiryTs looks like milliseconds. Anchor expects unix seconds; ` +
+        `use isoToUnixSeconds(iso) or expiryTsFromTenorDays(1 | 7 | 14 | 28 | 90).`,
+    );
+  }
+
+  const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000);
+  const deltaSeconds = expirySeconds - nowSeconds;
+  if (deltaSeconds <= 0) {
+    throw new Error(`${context}: expiry must be in the future`);
+  }
+
+  const allowed = SKEW_ALLOWED_TENORS_BY_UNDERLYING[underlying];
+  for (const days of allowed) {
+    const targetSeconds = days * 86_400;
+    if (Math.abs(deltaSeconds - targetSeconds) <= TENOR_TOLERANCE_SECONDS) {
+      return days;
+    }
+  }
+
+  const nearest = allowed.reduce((best, days) => {
+    const diff = Math.abs(deltaSeconds - days * 86_400);
+    return diff < best.diff ? { days, diff } : best;
+  }, { days: allowed[0], diff: Number.POSITIVE_INFINITY });
+
+  throw new Error(
+    `${context}: ${underlying} expiry is ${formatDeltaSeconds(deltaSeconds)} from now, ` +
+      `but this deployment only accepts ${tenorLabel(allowed)} buckets ` +
+      `(±${TENOR_TOLERANCE_SECONDS / 60}m). ` +
+      `Nearest bucket is ${nearest.days}d; build bot expiries with ` +
+      `expiryFromTenorDays(${nearest.days}).`,
+  );
+}
+
 /** Encode buy/sell direction as the anchor wire i8 (+1 / -1). */
 export function directionToI8(direction: Direction): number {
   return direction === "buy" ? 1 : -1;
@@ -927,18 +1054,37 @@ export function findComboIntentV2Pda(
  * `current_index - 1` in the same tx as `submit_rfq_quote`. The on-chain
  * handler reads the Instructions sysvar and verifies the signature.
  */
+export function rfqQuoteDigestBytes(
+  auction: PublicKey,
+  premiumMicro: bigint,
+  validUntilSlot: bigint,
+  mm: PublicKey,
+): Uint8Array {
+  const payload = new Uint8Array(80);
+  payload.set(auction.toBytes(), 0);
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  view.setBigUint64(32, premiumMicro, true);
+  view.setBigUint64(40, validUntilSlot, true);
+  payload.set(mm.toBytes(), 48);
+  return sha256(payload);
+}
+
+export function rfqQuoteDigestHex(
+  auction: PublicKey,
+  premiumMicro: bigint,
+  validUntilSlot: bigint,
+  mm: PublicKey,
+): string {
+  return Array.from(rfqQuoteDigestBytes(auction, premiumMicro, validUntilSlot, mm))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export function rfqQuoteDigest(
   auction: PublicKey,
   premiumMicro: bigint,
   validUntilSlot: bigint,
   mm: PublicKey,
 ): Buffer {
-  const payload = Buffer.alloc(80);
-  auction.toBuffer().copy(payload, 0);
-  payload.writeBigUInt64LE(premiumMicro, 32);
-  payload.writeBigUInt64LE(validUntilSlot, 40);
-  mm.toBuffer().copy(payload, 48);
-  // @noble/hashes is universal (browser + Node) — avoids the
-  // `node:crypto` import that breaks webpack client bundles.
-  return Buffer.from(sha256(payload));
+  return Buffer.from(rfqQuoteDigestBytes(auction, premiumMicro, validUntilSlot, mm));
 }

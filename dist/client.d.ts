@@ -1,6 +1,6 @@
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import { Program, type Wallet, type Idl } from "@coral-xyz/anchor";
-import type { CreateParams, CreateResult, BuyResult, SettleResult, RegisterCmParams, RegisterCmResult, TxResult, MarginCalcResult, ListOptionsOpts, OptionSummary, IsolatedVaultSnapshot, DvolSnapshot, ComboLeg, ComboIntentSnapshot, RecoveryWinnerCm, RecoveryStepResult, PoVSStateSnapshot, HamiltonSnapshot, SkewMetricsSnapshot, InsuranceFundSnapshot, ClearingMemberSnapshot, LstVaultSnapshot, NativeSolVaultSnapshot, SeriesListingSnapshot, BuilderCodeSnapshot, ConditionalOrderSnapshot, RfqAuctionSnapshot, ComboIntentV2Snapshot, CrossAssetSnapshot, MicrostructureSnapshot, CollateralPolicySnapshot } from "./types";
+import type { CreateParams, CreateResult, BuyResult, SettleResult, RegisterCmParams, RegisterCmResult, TxResult, MarginCalcResult, ListOptionsOpts, OptionSummary, IsolatedVaultSnapshot, DvolSnapshot, ComboLeg, ComboIntentSnapshot, RecoveryWinnerCm, RecoveryStepResult, PoVSStateSnapshot, HamiltonSnapshot, SkewMetricsSnapshot, InsuranceFundSnapshot, ClearingMemberSnapshot, LstVaultSnapshot, NativeSolVaultSnapshot, SeriesListingSnapshot, BuilderCodeSnapshot, ConditionalOrderSnapshot, RfqAuctionSnapshot, ComboIntentV2Snapshot, CrossAssetSnapshot, MicrostructureSnapshot, CollateralPolicySnapshot, RfqMakerSnapshot } from "./types";
 export interface SkewClientOptions {
     programId?: string;
     usdcMint?: string;
@@ -581,6 +581,8 @@ export declare class SkewClient {
     registerRfqMaker(): Promise<TxResult & {
         registry: PublicKey;
     }>;
+    /** Read a maker's RFQ registry state, including quote-off and MMP counters. */
+    fetchRfqMaker(mm?: PublicKey): Promise<RfqMakerSnapshot | null>;
     /**
      * Update the RFQ maker's on-chain kill switch + public tape controls.
      *
@@ -646,6 +648,21 @@ export declare class SkewClient {
         validUntilSlot: bigint;
         mmSignature: Uint8Array;
     }): Promise<TxResult>;
+    submitRfqQuoteSigned(args: {
+        auction: PublicKey;
+        premiumMicro: bigint;
+        validUntilSlot: bigint;
+        mmSignature: Uint8Array;
+    }): Promise<TxResult>;
+    /**
+     * Browser/direct RFQ quote lane. The MM wallet signs the transaction only;
+     * no detached `signMessage` digest is required. Use this from terminal UI.
+     */
+    submitRfqQuoteDirect(args: {
+        auction: PublicKey;
+        premiumMicro: bigint;
+        validUntilSlot: bigint;
+    }): Promise<TxResult>;
     /** Permissionless RFQ finalizer. Refunds RFQ escrow to buyer; relay atomic fill handles option mint + MM premium. */
     finalizeRfqAuction(args: {
         auction: PublicKey;
@@ -658,7 +675,7 @@ export declare class SkewClient {
      *
      * The current Anchor IDL no longer exposes `take_best_quote`. Do not emulate
      * it against RFQ-auction state. Use the Instant RFQ relay lane for 1-click
-     * HIT (`buyer_accept` → `cm_sign` → `buyer_tx_signed` →
+     * HIT (`buyer_accept_tx_signed` → `cm_sign` → `buyer_tx_signed` →
      * `atomic_fill_from_relay`) or keep the
      * auction lane as price discovery + `finalizeRfqAuction`.
      */

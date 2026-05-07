@@ -9,8 +9,10 @@
 // premium ascending, and return the preview shape. The current Anchor IDL no
 // longer exposes `take_best_quote`, so this module deliberately refuses to
 // execute auction quotes as fills. Skew now has two RFQ lanes:
-//   1. Instant RFQ HIT: relay websocket quote_request → buyer_accept → cm_sign
-//      → buyer_tx_signed → atomic_fill_from_relay.
+//   1. Instant RFQ HIT: relay websocket quote_request →
+//      buyer_accept_tx_signed → cm_sign → buyer_tx_signed →
+//      atomic_fill_from_relay. Bot/HSM callers may still use legacy
+//      buyer_accept with a detached digest signature.
 //   2. Auction RFQ: register_rfq_auction → submit_rfq_quote →
 //      finalize_rfq_auction. This is price discovery / event finalization.
 //
@@ -54,7 +56,7 @@ async function routeToBestQuote(client, candidates, opts = {}) {
         failures.push({
             auction: c.auction.toBase58(),
             premiumMicro: c.bestPremiumMicro,
-            error: "take_best_quote is not in the current skew_master IDL. Use Instant RFQ relay HIT (buyer_accept + cm_sign + buyer_tx_signed) for click-to-fill, or finalize the auction lane after close_slot.",
+            error: "take_best_quote is not in the current skew_master IDL. Use Instant RFQ relay HIT (buyer_accept_tx_signed + cm_sign + buyer_tx_signed) for click-to-fill, or finalize the auction lane after close_slot.",
         });
     }
     // mode=aggressive remainder beyond topN doesn't apply; if topN ≤ sorted.length

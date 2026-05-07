@@ -1,8 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MPL_TOKEN_METADATA_PROGRAM_ID = exports.MAKER_AXE_SEED = exports.PYTH_SOL_USD_FEED = exports.JITOSOL_STAKE_POOL = exports.NATIVE_SOL_MINT = exports.JITOSOL_MINT = exports.ASSET_DEFAULT_SIGMA = exports.SKEW_PROGRAM_ID = void 0;
+exports.MPL_TOKEN_METADATA_PROGRAM_ID = exports.MAKER_AXE_SEED = exports.PYTH_SOL_USD_FEED = exports.JITOSOL_STAKE_POOL = exports.NATIVE_SOL_MINT = exports.JITOSOL_MINT = exports.SKEW_ALLOWED_TENORS_BY_UNDERLYING = exports.TENOR_TOLERANCE_SECONDS = exports.STANDARD_TENOR_DAYS = exports.ASSET_DEFAULT_SIGMA = exports.SKEW_PROGRAM_ID = void 0;
 exports.resolvePythFeed = resolvePythFeed;
 exports.assetEnumIndex = assetEnumIndex;
+exports.expiryFromTenorDays = expiryFromTenorDays;
+exports.expiryTsFromTenorDays = expiryTsFromTenorDays;
+exports.assertExpiryTenor = assertExpiryTenor;
 exports.directionToI8 = directionToI8;
 exports.mapPayoffToAnchor = mapPayoffToAnchor;
 exports.fetchPythSpotUsd = fetchPythSpotUsd;
@@ -58,6 +61,8 @@ exports.findRfqAuctionPda = findRfqAuctionPda;
 exports.findRfqMakerPda = findRfqMakerPda;
 exports.findRfqAuctionEscrowPda = findRfqAuctionEscrowPda;
 exports.findComboIntentV2Pda = findComboIntentV2Pda;
+exports.rfqQuoteDigestBytes = rfqQuoteDigestBytes;
+exports.rfqQuoteDigestHex = rfqQuoteDigestHex;
 exports.rfqQuoteDigest = rfqQuoteDigest;
 const web3_js_1 = require("@solana/web3.js");
 const sha256_1 = require("@noble/hashes/sha256");
@@ -104,6 +109,102 @@ function assetEnumIndex(underlying) {
     if (idx === undefined)
         throw new Error(`Unsupported asset: ${underlying}`);
     return idx;
+}
+// ---------------------------------------------------------------------------
+// Expiry tenor policy.
+//
+// The on-chain AssetParams validator does not accept arbitrary expiries.
+// Bots should build expiries from these helpers instead of hand-rolling
+// `Date.now() + hours`, especially around the +/-1h boundary.
+// ---------------------------------------------------------------------------
+exports.STANDARD_TENOR_DAYS = [1, 7, 14, 28, 90];
+exports.TENOR_TOLERANCE_SECONDS = 3600;
+exports.SKEW_ALLOWED_TENORS_BY_UNDERLYING = {
+    BTC: [1, 7, 14, 28, 90],
+    ETH: [1, 7, 14, 28, 90],
+    SOL: [1, 7, 14, 28, 90],
+    XRP: [7, 14, 28],
+    HYPE: [1, 7, 14, 28],
+};
+function formatDeltaSeconds(deltaSeconds) {
+    if (Math.abs(deltaSeconds) < 72 * 3600) {
+        return `${(deltaSeconds / 3600).toFixed(2)}h`;
+    }
+    return `${(deltaSeconds / 86400).toFixed(2)}d`;
+}
+function tenorLabel(days) {
+    return days.map((d) => `${d}d`).join("/");
+}
+/**
+ * Return an ISO timestamp exactly N standard tenor days from now.
+ *
+ * Use this in bots instead of `Date.now() + hours`. For example:
+ *
+ * ```ts
+ * const expiry = expiryFromTenorDays(7);
+ * await skew.create({ underlying: "BTC", expiry, ... });
+ * ```
+ */
+function expiryFromTenorDays(days, nowMs = Date.now()) {
+    return new Date(Number(expiryTsFromTenorDays(days, nowMs)) * 1000).toISOString();
+}
+/**
+ * Return unix seconds exactly N standard tenor days from now.
+ *
+ * This is the safer helper for low-level RFQ structs where Anchor expects
+ * `expiryTs: bigint`. Do not pass `Date.now()` milliseconds to those fields.
+ */
+function expiryTsFromTenorDays(days, nowMs = Date.now()) {
+    if (!exports.STANDARD_TENOR_DAYS.includes(days)) {
+        throw new Error(`Unsupported Skew tenor: ${days}d`);
+    }
+    const nowSeconds = Math.floor(nowMs / 1000);
+    return BigInt(nowSeconds + days * 86400);
+}
+/**
+ * SDK preflight for the on-chain AssetParams tenor buckets.
+ *
+ * Returns the matched tenor day. Throws before a transaction is built if the
+ * expiry is off-bucket, so bots see a precise SDK error instead of an Anchor
+ * simulation failure such as `6001`.
+ */
+function assertExpiryTenor(underlyingOrAsset, expiryTs, options = {}) {
+    const context = options.context ?? "expiry";
+    const underlying = typeof underlyingOrAsset === "number"
+        ? indexToUnderlying(underlyingOrAsset)
+        : underlyingOrAsset;
+    if (!underlying) {
+        throw new Error(`${context}: unsupported asset index ${underlyingOrAsset}`);
+    }
+    const expirySeconds = Number(expiryTs);
+    if (!Number.isFinite(expirySeconds) || !Number.isSafeInteger(expirySeconds)) {
+        throw new Error(`${context}: invalid unix expiry seconds ${String(expiryTs)}`);
+    }
+    if (expirySeconds > 10000000000) {
+        throw new Error(`${context}: expiryTs looks like milliseconds. Anchor expects unix seconds; ` +
+            `use isoToUnixSeconds(iso) or expiryTsFromTenorDays(1 | 7 | 14 | 28 | 90).`);
+    }
+    const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1000);
+    const deltaSeconds = expirySeconds - nowSeconds;
+    if (deltaSeconds <= 0) {
+        throw new Error(`${context}: expiry must be in the future`);
+    }
+    const allowed = exports.SKEW_ALLOWED_TENORS_BY_UNDERLYING[underlying];
+    for (const days of allowed) {
+        const targetSeconds = days * 86400;
+        if (Math.abs(deltaSeconds - targetSeconds) <= exports.TENOR_TOLERANCE_SECONDS) {
+            return days;
+        }
+    }
+    const nearest = allowed.reduce((best, days) => {
+        const diff = Math.abs(deltaSeconds - days * 86400);
+        return diff < best.diff ? { days, diff } : best;
+    }, { days: allowed[0], diff: Number.POSITIVE_INFINITY });
+    throw new Error(`${context}: ${underlying} expiry is ${formatDeltaSeconds(deltaSeconds)} from now, ` +
+        `but this deployment only accepts ${tenorLabel(allowed)} buckets ` +
+        `(±${exports.TENOR_TOLERANCE_SECONDS / 60}m). ` +
+        `Nearest bucket is ${nearest.days}d; build bot expiries with ` +
+        `expiryFromTenorDays(${nearest.days}).`);
 }
 /** Encode buy/sell direction as the anchor wire i8 (+1 / -1). */
 function directionToI8(direction) {
@@ -736,14 +837,21 @@ function findComboIntentV2Pda(buyer, comboId, programId = exports.SKEW_PROGRAM_I
  * `current_index - 1` in the same tx as `submit_rfq_quote`. The on-chain
  * handler reads the Instructions sysvar and verifies the signature.
  */
+function rfqQuoteDigestBytes(auction, premiumMicro, validUntilSlot, mm) {
+    const payload = new Uint8Array(80);
+    payload.set(auction.toBytes(), 0);
+    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    view.setBigUint64(32, premiumMicro, true);
+    view.setBigUint64(40, validUntilSlot, true);
+    payload.set(mm.toBytes(), 48);
+    return (0, sha256_1.sha256)(payload);
+}
+function rfqQuoteDigestHex(auction, premiumMicro, validUntilSlot, mm) {
+    return Array.from(rfqQuoteDigestBytes(auction, premiumMicro, validUntilSlot, mm))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+}
 function rfqQuoteDigest(auction, premiumMicro, validUntilSlot, mm) {
-    const payload = Buffer.alloc(80);
-    auction.toBuffer().copy(payload, 0);
-    payload.writeBigUInt64LE(premiumMicro, 32);
-    payload.writeBigUInt64LE(validUntilSlot, 40);
-    mm.toBuffer().copy(payload, 48);
-    // @noble/hashes is universal (browser + Node) — avoids the
-    // `node:crypto` import that breaks webpack client bundles.
-    return Buffer.from((0, sha256_1.sha256)(payload));
+    return Buffer.from(rfqQuoteDigestBytes(auction, premiumMicro, validUntilSlot, mm));
 }
 //# sourceMappingURL=pda.js.map

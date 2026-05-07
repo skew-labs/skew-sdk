@@ -7,9 +7,9 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   SYSVAR_RENT_PUBKEY,
   Transaction,
+  TransactionInstruction,
   type AccountMeta,
   type Signer,
-  type TransactionInstruction,
 } from "@solana/web3.js";
 import { BN, Program, AnchorProvider, type Wallet, type Idl } from "@coral-xyz/anchor";
 import {
@@ -62,6 +62,7 @@ import type {
   MicrostructureSnapshot,
   CollateralPolicySnapshot,
   TxSimulationResult,
+  RfqMakerSnapshot,
 } from "./types";
 import {
   SKEW_PROGRAM_ID,
@@ -91,6 +92,7 @@ import {
   toUsdcUnits,
   settlementMintDecimals,
   isoToUnixSeconds,
+  assertExpiryTenor,
   // V2.1 anchor-instruction helpers (sub-1779)
   assetEnumIndex,
   directionToI8,
@@ -114,6 +116,7 @@ import {
   findRfqMakerPda,
   findComboIntentV2Pda,
   rfqQuoteDigest,
+  rfqQuoteDigestBytes,
   // Phase 1633.LST — jitoSOL collateral
   findLstVaultPda,
   findLstVaultEscrowPda,
@@ -135,8 +138,15 @@ const DEVNET_USDC_MINT = new PublicKey(
   process.env["SKEW_DEVNET_USDC_MINT"] ?? "4T2KU8PXd25XvMh6kzv3F7d55yPP6NcS7HemERBe97K8",
 );
 
-const PM_CALCULATE_CU_LIMIT = 1_000_000;
-const PM_VARIATION_CU_LIMIT = 400_000;
+const PM_MIN_CU_LIMIT = 400_000;
+const PM_MAX_CU_LIMIT = 1_000_000;
+const RFQ_QUOTE_DIRECT_CU_LIMIT = 80_000;
+const RFQ_QUOTE_ED25519_CU_LIMIT = 120_000;
+
+function estimatePmCuLimit(remainingAccountCount: number): number {
+  const count = Math.max(0, Math.floor(remainingAccountCount));
+  return Math.min(PM_MAX_CU_LIMIT, Math.max(PM_MIN_CU_LIMIT, 300_000 + count * 25_000));
+}
 
 export interface SkewClientOptions {
   programId?: string;
@@ -535,6 +545,7 @@ export class SkewClient {
     const pythFeed = resolvePythFeed(underlying);
     const strikeOnChain = toOnChainStrike(strike);
     const expiryTs = isoToUnixSeconds(expiry);
+    assertExpiryTenor(underlying, expiryTs, { context: "create" });
     const payoffUnits = toSettlementUnits(notional, settlementMint);
     const upperBoundOnChain = params.upperBound ? toOnChainStrike(params.upperBound) : 0n;
 
@@ -1465,7 +1476,7 @@ export class SkewClient {
       .remainingAccounts(pmRemaining)
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({
-          units: PM_VARIATION_CU_LIMIT,
+          units: estimatePmCuLimit(pmRemaining.length),
         }),
       ])
       .transaction();
@@ -1492,12 +1503,8 @@ export class SkewClient {
 
     const pmRemaining = await this._pmRemaining(caller);
 
-    // ConvexHullIM dispatch + Greeks aggregation + per-asset PoVS / Hamilton
-    // reads + tier-specific add-ons can exceed the default 200 K CU budget on
-    // larger portfolios. Bump to 1 M unconditionally — the upper bound for a
-    // 10-position × 5-asset Platinum scan is ~145 kCU (`docs/runbooks/cu-budget-tier-v5.md`).
     const cuLimit = ComputeBudgetProgram.setComputeUnitLimit({
-      units: PM_CALCULATE_CU_LIMIT,
+      units: estimatePmCuLimit(pmRemaining.length),
     });
 
     const tx = await this._program()
@@ -1512,9 +1519,8 @@ export class SkewClient {
     const txSignature = await this._sendAndConfirm(tx);
 
     // Read CM PDA to extract resulting IM breakdown
-    const cmAccountClient = (
-      this._program().account as Record<string, { fetch: (k: PublicKey) => Promise<unknown> }>
-    )["clearingMember"];
+    const accounts = this._program().account as Record<string, { fetch: (k: PublicKey) => Promise<unknown> }>;
+    const cmAccountClient = accounts["clearingMemberAccount"] ?? accounts["clearingMember"];
     if (!cmAccountClient) {
       // Fallback if account name differs — return tx sig only
       return {
@@ -2371,7 +2377,8 @@ export class SkewClient {
       const ifContribution = BigInt(acc.ifContribution.toString());
       const tierLockup = BigInt(acc.tierLockupCollateral.toString());
       const totalPmLocked = BigInt(acc.totalPmLockedMicro.toString());
-      const free = collateral - ifContribution - tierLockup - totalPmLocked;
+      const free = collateral - tierLockup - totalPmLocked;
+      const tradable = collateral - totalPmLocked;
       const tierKey = Object.keys(acc.tier)[0] ?? "standard";
       const tierMap: Record<string, 0 | 1 | 2 | 3> = {
         standard: 0,
@@ -2386,6 +2393,7 @@ export class SkewClient {
         tierLockupCollateralMicro: tierLockup,
         totalPmLockedMicro: totalPmLocked,
         freeCollateralMicro: free > 0n ? free : 0n,
+        tradableCollateralMicro: tradable > 0n ? tradable : 0n,
         netNotionalLongMicro: BigInt(acc.netNotionalLong.toString()),
         netNotionalShortMicro: BigInt(acc.netNotionalShort.toString()),
         positionsCount: Number(acc.positionsCount),
@@ -2844,6 +2852,38 @@ export class SkewClient {
     return { txSignature, registry };
   }
 
+  /** Read a maker's RFQ registry state, including quote-off and MMP counters. */
+  async fetchRfqMaker(mm: PublicKey = this.wallet.publicKey): Promise<RfqMakerSnapshot | null> {
+    this._assertProgramLoaded();
+    const [pda] = findRfqMakerPda(mm);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const acc: any = await (this._program().account as any).rfqMakerRegistryPda.fetch(pda);
+      const depositLamports = BigInt(acc.depositLamports.toString());
+      return {
+        pda,
+        mm,
+        depositLamports,
+        depositMicro: depositLamports,
+        successCount: Number(acc.successCount),
+        failCount: Number(acc.failCount),
+        slashable: Boolean(acc.slashable),
+        registeredAt: BigInt(acc.registeredAt.toString()),
+        quoteOff: Boolean(acc.quoteOff),
+        identityMode: Number(acc.identityMode),
+        marginMode: Number(acc.marginMode),
+        riskScopeAsset: Number(acc.riskScopeAsset),
+        collateralScope: Number(acc.collateralScope),
+        mmpWindowStartTs: BigInt(acc.mmpWindowStartTs.toString()),
+        mmpWindowFillCount: Number(acc.mmpWindowFillCount),
+        mmpWindowPremiumMicro: BigInt(acc.mmpWindowPremiumMicro.toString()),
+        mmpWindowNotionalMicro: BigInt(acc.mmpWindowNotionalMicro.toString()),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Update the RFQ maker's on-chain kill switch + public tape controls.
    *
@@ -2916,6 +2956,9 @@ export class SkewClient {
         "registerRfqAuction: current on-chain RFQ v1 is USDC/stable-only; use atomic_fill_from_relay / CM collateral paths for SOL or jitoSOL capacity.",
       );
     }
+    assertExpiryTenor(args.optionSpec.asset, args.optionSpec.expiryTs, {
+      context: "registerRfqAuction",
+    });
     const buyerSettlementAta = getAssociatedTokenAddressSync(settlementMint, buyer);
     const rfqDirection =
       args.optionSpec.optionType === 3 && args.optionSpec.direction === 0
@@ -2972,19 +3015,46 @@ export class SkewClient {
     validUntilSlot: bigint;
     mmSignature: Uint8Array; // ed25519 sig over rfqQuoteDigest(...)
   }): Promise<TxResult> {
+    return this.submitRfqQuoteSigned(args);
+  }
+
+  async submitRfqQuoteSigned(args: {
+    auction: PublicKey;
+    premiumMicro: bigint;
+    validUntilSlot: bigint;
+    mmSignature: Uint8Array; // ed25519 sig over rfqQuoteDigestBytes(...)
+  }): Promise<TxResult> {
     this._assertProgramLoaded();
     const mm = this.wallet.publicKey;
     const [registry] = findRfqMakerPda(mm);
-    const digest = rfqQuoteDigest(args.auction, args.premiumMicro, args.validUntilSlot, mm);
+    const digest = rfqQuoteDigestBytes(args.auction, args.premiumMicro, args.validUntilSlot, mm);
     if (args.mmSignature.length !== 64) {
       throw new Error(
-        `submitRfqQuote: mmSignature must be 64 bytes (ed25519), got ${args.mmSignature.length}`,
+        `submitRfqQuoteSigned: mmSignature must be 64 bytes (ed25519), got ${args.mmSignature.length}`,
       );
     }
-    const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
-      publicKey: mm.toBuffer(),
-      message: digest,
-      signature: args.mmSignature,
+    // The on-chain RFQ parser intentionally mirrors the atomic-fill relay's
+    // fixed Ed25519 layout:
+    //   header[16] | pubkey[32] | digest[32] | signature[64]
+    // web3.js' convenience builder places message/signature at different
+    // offsets, so build the tiny verify instruction directly.
+    const edData = Buffer.alloc(144);
+    edData[0] = 1;
+    edData[1] = 0;
+    edData.writeUInt16LE(80, 2);        // signature_offset
+    edData.writeUInt16LE(0xffff, 4);    // signature_instruction_index
+    edData.writeUInt16LE(16, 6);        // public_key_offset
+    edData.writeUInt16LE(0xffff, 8);    // public_key_instruction_index
+    edData.writeUInt16LE(48, 10);       // message_data_offset
+    edData.writeUInt16LE(32, 12);       // message_data_size
+    edData.writeUInt16LE(0xffff, 14);   // message_instruction_index
+    mm.toBuffer().copy(edData, 16);
+    Buffer.from(digest).copy(edData, 48);
+    Buffer.from(args.mmSignature).copy(edData, 80);
+    const ed25519Ix = new TransactionInstruction({
+      programId: Ed25519Program.programId,
+      keys: [],
+      data: edData,
     });
     const sigArr = Array.from(args.mmSignature);
     const submitIx = await this._program()
@@ -3001,7 +3071,41 @@ export class SkewClient {
         governance: findGovernancePda()[0],
       })
       .instruction();
-    const tx = new Transaction().add(ed25519Ix).add(submitIx);
+    const tx = new Transaction()
+      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: RFQ_QUOTE_ED25519_CU_LIMIT }))
+      .add(ed25519Ix)
+      .add(submitIx);
+    const txSignature = await this._sendAndConfirm(tx);
+    return { txSignature };
+  }
+
+  /**
+   * Browser/direct RFQ quote lane. The MM wallet signs the transaction only;
+   * no detached `signMessage` digest is required. Use this from terminal UI.
+   */
+  async submitRfqQuoteDirect(args: {
+    auction: PublicKey;
+    premiumMicro: bigint;
+    validUntilSlot: bigint;
+  }): Promise<TxResult> {
+    this._assertProgramLoaded();
+    const mm = this.wallet.publicKey;
+    const [registry] = findRfqMakerPda(mm);
+    const tx = await this._program()
+      .methods.submitRfqQuoteTxSigned({
+        premiumMicro: new BN(args.premiumMicro.toString()),
+        validUntilSlot: new BN(args.validUntilSlot.toString()),
+      })
+      .accounts({
+        mm,
+        registry,
+        auction: args.auction,
+        governance: findGovernancePda()[0],
+      })
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: RFQ_QUOTE_DIRECT_CU_LIMIT }),
+      ])
+      .transaction();
     const txSignature = await this._sendAndConfirm(tx);
     return { txSignature };
   }
@@ -3067,7 +3171,7 @@ export class SkewClient {
    *
    * The current Anchor IDL no longer exposes `take_best_quote`. Do not emulate
    * it against RFQ-auction state. Use the Instant RFQ relay lane for 1-click
-   * HIT (`buyer_accept` → `cm_sign` → `buyer_tx_signed` →
+   * HIT (`buyer_accept_tx_signed` → `cm_sign` → `buyer_tx_signed` →
    * `atomic_fill_from_relay`) or keep the
    * auction lane as price discovery + `finalizeRfqAuction`.
    */
@@ -3084,7 +3188,7 @@ export class SkewClient {
     void args;
     this._assertProgramLoaded();
     throw new Error(
-      "take_best_quote is not in the current skew_master IDL. Use Instant RFQ relay HIT (buyer_accept + cm_sign + buyer_tx_signed) for click-to-fill, or finalizeRfqAuction after close_slot for the auction lane.",
+      "take_best_quote is not in the current skew_master IDL. Use Instant RFQ relay HIT (buyer_accept_tx_signed + cm_sign + buyer_tx_signed) for click-to-fill, or finalizeRfqAuction after close_slot for the auction lane.",
     );
   }
 
@@ -3108,7 +3212,7 @@ export class SkewClient {
     void args;
     this._assertProgramLoaded();
     throw new Error(
-      "take-and-fill is disabled because take_best_quote is not in the current skew_master IDL. Use Instant RFQ buyer_accept + cm_sign + buyer_tx_signed over RelayPayload for atomic_fill_from_relay.",
+      "take-and-fill is disabled because take_best_quote is not in the current skew_master IDL. Use Instant RFQ buyer_accept_tx_signed + cm_sign + buyer_tx_signed over RelayPayload for atomic_fill_from_relay.",
     );
   }
 
@@ -3437,7 +3541,7 @@ export class SkewClient {
       .remainingAccounts(pmRemaining)
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({
-          units: PM_VARIATION_CU_LIMIT,
+          units: estimatePmCuLimit(pmRemaining.length),
         }),
       ])
       .transaction();

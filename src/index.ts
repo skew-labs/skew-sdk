@@ -17,8 +17,10 @@ export {
   collectInstantRfqQuotes,
   encodeRelayPayload,
   hitInstantRfqQuote,
+  hitInstantRfqQuoteTxSigned,
   relayPayloadDigest,
   relayPayloadToJson,
+  RfqWalletMessageSigningUnsupported,
   validateInstantRfqLane,
 } from "./instant-rfq";
 export type {
@@ -33,6 +35,7 @@ export {
   SKEW_CAPABILITIES_VERSION,
   SKEW_COLLATERAL_RAILS,
   SKEW_PAYOFF_TYPES,
+  SKEW_TENOR_POLICY,
   SKEW_TRADE_LANES,
   SKEW_UNDERLYINGS,
   getSkewCapabilities,
@@ -40,6 +43,7 @@ export {
 export type {
   SkewCollateralRail,
   SkewCollateralSymbol,
+  SkewTenorPolicy,
   SkewTradeLaneCapability,
   SkewTradeLaneId,
 } from "./capabilities";
@@ -133,6 +137,12 @@ export {
   toUsdcUnits,
   settlementMintDecimals,
   isoToUnixSeconds,
+  expiryFromTenorDays,
+  expiryTsFromTenorDays,
+  assertExpiryTenor,
+  STANDARD_TENOR_DAYS,
+  TENOR_TOLERANCE_SECONDS,
+  SKEW_ALLOWED_TENORS_BY_UNDERLYING,
   generateNonce,
   // V2.1 anchor instruction helpers (sub-1779)
   assetEnumIndex,
@@ -156,6 +166,8 @@ export {
   findRfqMakerPda,
   findComboIntentV2Pda,
   rfqQuoteDigest,
+  rfqQuoteDigestBytes,
+  rfqQuoteDigestHex,
   // Phase 1633.LST — jitoSOL collateral
   findLstVaultPda,
   findLstVaultEscrowPda,
@@ -174,7 +186,7 @@ export {
   findAuctionPda,
   findAuctionEscrowPda,
 } from "./pda";
-export type { PayoffMapping } from "./pda";
+export type { PayoffMapping, StandardTenorDays, AssertExpiryTenorOptions } from "./pda";
 export { getMarginBreakdown } from "./margin";
 export type {
   MarginBreakdownLeg,

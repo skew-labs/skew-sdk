@@ -492,8 +492,27 @@ export interface RfqAuctionSnapshot {
 export interface RfqMakerSnapshot {
     pda: PublicKey;
     mm: PublicKey;
+    /** Lamports staked in the anti-spam maker registry deposit. */
+    depositLamports: bigint;
+    /** Back-compat alias for earlier SDK consumers; this is lamports, not USDC micro. */
     depositMicro: bigint;
+    successCount: number;
+    failCount: number;
+    slashable: boolean;
     registeredAt: bigint;
+    quoteOff: boolean;
+    /** 0=anonymous, 1=disclosed. */
+    identityMode: number;
+    /** 0=portfolio, 1=single-asset, 2=cross-portfolio. */
+    marginMode: number;
+    /** 255=cross-asset, or 0..4 for launch-panel assets. */
+    riskScopeAsset: number;
+    /** 0=cross, 1=segregated. */
+    collateralScope: number;
+    mmpWindowStartTs: bigint;
+    mmpWindowFillCount: number;
+    mmpWindowPremiumMicro: bigint;
+    mmpWindowNotionalMicro: bigint;
 }
 /**
  * Decoded snapshot of a `PoVSState` PDA. The full path-of-volatility-surface
@@ -594,6 +613,8 @@ export interface ClearingMemberSnapshot {
     totalPmLockedMicro: bigint;
     /** `free_collateral()` = collateral − tier_lockup − total_pm_locked. */
     freeCollateralMicro: bigint;
+    /** `tradable_collateral()` = collateral − total_pm_locked; tier lockup is IM-eligible. */
+    tradableCollateralMicro: bigint;
     /** Net long notional across all positions (USDC micro). */
     netNotionalLongMicro: bigint;
     netNotionalShortMicro: bigint;

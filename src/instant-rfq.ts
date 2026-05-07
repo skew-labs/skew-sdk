@@ -7,6 +7,20 @@ export const INSTANT_RFQ_DEFAULT_RELAY_URL =
 
 export const RELAY_PAYLOAD_LEN = 100 as const;
 
+export class RfqWalletMessageSigningUnsupported extends Error {
+  readonly code = "RFQ_WALLET_MESSAGE_SIGNING_UNSUPPORTED";
+
+  constructor(cause?: unknown) {
+    super(
+      "This wallet cannot sign arbitrary Solana messages for Instant RFQ. Use hitInstantRfqQuoteTxSigned, which only requires a normal transaction signature.",
+    );
+    this.name = "RfqWalletMessageSigningUnsupported";
+    if (cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = cause;
+    }
+  }
+}
+
 export interface RelayPayload {
   relayNonce: bigint;
   quoteExpiryTs: bigint;
@@ -162,6 +176,12 @@ export function relayPayloadDigest(payloadOrBytes: RelayPayload | Uint8Array): U
   return sha256(bytes);
 }
 
+function exactMessageBytes(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(bytes.length);
+  out.set(bytes);
+  return out;
+}
+
 export function relayPayloadToJson(payload: RelayPayload): Record<string, unknown> {
   return {
     relay_nonce: payload.relayNonce.toString(),
@@ -267,23 +287,68 @@ export async function collectInstantRfqQuotes(args: {
   });
 }
 
-export async function hitInstantRfqQuote(args: {
+type InstantRfqHitBaseArgs = {
   buyer: PublicKey;
   cmPubkey: PublicKey;
   payload: RelayPayload;
-  signMessage: (message: Uint8Array) => Promise<Uint8Array>;
   signTransaction: (transaction: Transaction) => Promise<Transaction>;
   relayUrl?: string;
   timeoutMs?: number;
+};
+
+/**
+ * Browser-safe Instant RFQ hit path.
+ *
+ * The buyer does not sign an arbitrary digest. Instead, the relay prepares the
+ * exact atomic_fill_from_relay transaction after the selected CM signs the
+ * payload digest, then the browser wallet signs that transaction normally.
+ */
+export async function hitInstantRfqQuoteTxSigned(
+  args: InstantRfqHitBaseArgs,
+): Promise<InstantRfqHitResult> {
+  validateInstantRfqLane(args.payload);
+  return hitInstantRfqQuoteInternal({
+    ...args,
+    kind: "buyer_accept_tx_signed",
+  });
+}
+
+/**
+ * Legacy bot/HSM Instant RFQ hit path. Kept for server wallets that can sign a
+ * detached Ed25519 digest. Browser wallets should use
+ * hitInstantRfqQuoteTxSigned to avoid Phantom/Solflare signMessage failures.
+ */
+export async function hitInstantRfqQuote(args: InstantRfqHitBaseArgs & {
+  signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+}): Promise<InstantRfqHitResult> {
+  if (typeof args.signMessage !== "function") {
+    throw new RfqWalletMessageSigningUnsupported();
+  }
+  validateInstantRfqLane(args.payload);
+  const digest = relayPayloadDigest(args.payload);
+  let sig: Uint8Array;
+  try {
+    sig = await args.signMessage(exactMessageBytes(digest));
+  } catch (cause) {
+    throw new RfqWalletMessageSigningUnsupported(cause);
+  }
+  if (sig.length !== 64) {
+    throw new Error(`buyer signature must be 64 bytes, got ${sig.length}`);
+  }
+  return hitInstantRfqQuoteInternal({
+    ...args,
+    kind: "buyer_accept",
+    buyerSig: sig,
+  });
+}
+
+async function hitInstantRfqQuoteInternal(args: InstantRfqHitBaseArgs & {
+  kind: "buyer_accept" | "buyer_accept_tx_signed";
+  buyerSig?: Uint8Array;
 }): Promise<InstantRfqHitResult> {
   const relayUrl = args.relayUrl ?? INSTANT_RFQ_DEFAULT_RELAY_URL;
   const timeoutMs = args.timeoutMs ?? 30_000;
   validateInstantRfqLane(args.payload);
-  const digest = relayPayloadDigest(args.payload);
-  const sig = await args.signMessage(digest);
-  if (sig.length !== 64) {
-    throw new Error(`buyer signature must be 64 bytes, got ${sig.length}`);
-  }
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(relayUrl);
@@ -331,9 +396,9 @@ export async function hitInstantRfqQuote(args: {
         pubkey: args.buyer.toBase58(),
       }));
       ws.send(JSON.stringify({
-        kind: "buyer_accept",
+        kind: args.kind,
         payload: relayPayloadToJson(args.payload),
-        buyer_sig_b64: bytesToBase64(sig),
+        ...(args.buyerSig ? { buyer_sig_b64: bytesToBase64(args.buyerSig) } : {}),
         buyer_pubkey: args.buyer.toBase58(),
         cm_pubkey: args.cmPubkey.toBase58(),
       }));

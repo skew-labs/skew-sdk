@@ -1,8 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SKEW_TRADE_LANES = exports.SKEW_COLLATERAL_RAILS = exports.SKEW_ASSET_PAYOFFS = exports.SKEW_PAYOFF_TYPES = exports.SKEW_ANCHOR_OPTION_TYPES = exports.SKEW_UNDERLYINGS = exports.SKEW_CAPABILITIES_VERSION = void 0;
+exports.SKEW_TRADE_LANES = exports.SKEW_COLLATERAL_RAILS = exports.SKEW_TENOR_POLICY = exports.SKEW_ASSET_PAYOFFS = exports.SKEW_PAYOFF_TYPES = exports.SKEW_ANCHOR_OPTION_TYPES = exports.SKEW_UNDERLYINGS = exports.SKEW_CAPABILITIES_VERSION = void 0;
 exports.getSkewCapabilities = getSkewCapabilities;
-exports.SKEW_CAPABILITIES_VERSION = "2026-05-06";
+exports.SKEW_CAPABILITIES_VERSION = "2026-05-07";
 exports.SKEW_UNDERLYINGS = [
     "BTC",
     "ETH",
@@ -61,6 +61,12 @@ exports.SKEW_ASSET_PAYOFFS = {
     ],
     HYPE: ["digital_call", "digital_put", "vanilla_call", "vanilla_put"],
 };
+exports.SKEW_TENOR_POLICY = {
+    onChainBucketsDays: [1, 7, 14, 28, 90],
+    toleranceSeconds: 3600,
+    minimumBucketDays: 1,
+    note: "Live on-chain create/fill paths require expiry to land inside one of the standard asset tenor buckets, with ±1h tolerance. Sub-1d binaries are intentionally not enabled in the current deployment.",
+};
 exports.SKEW_COLLATERAL_RAILS = [
     {
         symbol: "USDC",
@@ -107,11 +113,13 @@ exports.SKEW_TRADE_LANES = [
             "collectInstantRfqQuotes",
             "buildRelayPayload",
             "relayPayloadDigest",
+            "hitInstantRfqQuoteTxSigned",
             "hitInstantRfqQuote",
         ],
         protocol: [
             "quote_request",
             "quote_ack",
+            "buyer_accept_tx_signed",
             "buyer_accept",
             "fill_consent",
             "cm_sign",
@@ -120,7 +128,7 @@ exports.SKEW_TRADE_LANES = [
             "atomic_fill_from_relay",
         ],
         settlement: ["USDC", "wSOL", "jitoSOL"],
-        summary: "Buyer hits a live CM quote; buyer and CM sign the same RelayPayload digest; relay submits atomic_fill_from_relay.",
+        summary: "Buyer hits a live CM quote; browser buyers sign the final fill transaction, while bot/HSM buyers may additionally sign the RelayPayload digest. CM quotes remain digest-signed.",
         note: "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills. Do not emulate take_best_quote; it is not in the current IDL.",
     },
     {
@@ -131,12 +139,15 @@ exports.SKEW_TRADE_LANES = [
         entrypoints: [
             "registerRfqMaker",
             "registerRfqAuction",
+            "submitRfqQuoteDirect",
             "submitRfqQuote",
+            "submitRfqQuoteSigned",
             "finalizeRfqAuction",
             "cancelRfqAuction",
         ],
         protocol: [
             "register_rfq_auction",
+            "submit_rfq_quote_tx_signed",
             "submit_rfq_quote",
             "finalize_rfq_auction",
             "cancel_rfq_auction",
@@ -265,6 +276,7 @@ function getSkewCapabilities() {
         anchorOptionTypes: exports.SKEW_ANCHOR_OPTION_TYPES,
         payoffTypes: exports.SKEW_PAYOFF_TYPES,
         assetPayoffs: exports.SKEW_ASSET_PAYOFFS,
+        tenorPolicy: exports.SKEW_TENOR_POLICY,
         collateralRails: exports.SKEW_COLLATERAL_RAILS,
         tradeLanes: exports.SKEW_TRADE_LANES,
         routing: {

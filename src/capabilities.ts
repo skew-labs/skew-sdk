@@ -34,7 +34,14 @@ export interface SkewTradeLaneCapability {
   note: string;
 }
 
-export const SKEW_CAPABILITIES_VERSION = "2026-05-06" as const;
+export interface SkewTenorPolicy {
+  onChainBucketsDays: readonly number[];
+  toleranceSeconds: number;
+  minimumBucketDays: number;
+  note: string;
+}
+
+export const SKEW_CAPABILITIES_VERSION = "2026-05-07" as const;
 
 export const SKEW_UNDERLYINGS = [
   "BTC",
@@ -98,6 +105,14 @@ export const SKEW_ASSET_PAYOFFS = {
   HYPE: ["digital_call", "digital_put", "vanilla_call", "vanilla_put"],
 } as const satisfies Record<Underlying, readonly PayoffType[]>;
 
+export const SKEW_TENOR_POLICY = {
+  onChainBucketsDays: [1, 7, 14, 28, 90],
+  toleranceSeconds: 3_600,
+  minimumBucketDays: 1,
+  note:
+    "Live on-chain create/fill paths require expiry to land inside one of the standard asset tenor buckets, with ±1h tolerance. Sub-1d binaries are intentionally not enabled in the current deployment.",
+} as const satisfies SkewTenorPolicy;
+
 export const SKEW_COLLATERAL_RAILS = [
   {
     symbol: "USDC",
@@ -145,11 +160,13 @@ export const SKEW_TRADE_LANES = [
       "collectInstantRfqQuotes",
       "buildRelayPayload",
       "relayPayloadDigest",
+      "hitInstantRfqQuoteTxSigned",
       "hitInstantRfqQuote",
     ],
     protocol: [
       "quote_request",
       "quote_ack",
+      "buyer_accept_tx_signed",
       "buyer_accept",
       "fill_consent",
       "cm_sign",
@@ -159,7 +176,7 @@ export const SKEW_TRADE_LANES = [
     ],
     settlement: ["USDC", "wSOL", "jitoSOL"],
     summary:
-      "Buyer hits a live CM quote; buyer and CM sign the same RelayPayload digest; relay submits atomic_fill_from_relay.",
+      "Buyer hits a live CM quote; browser buyers sign the final fill transaction, while bot/HSM buyers may additionally sign the RelayPayload digest. CM quotes remain digest-signed.",
     note:
       "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills. Do not emulate take_best_quote; it is not in the current IDL.",
   },
@@ -171,12 +188,15 @@ export const SKEW_TRADE_LANES = [
     entrypoints: [
       "registerRfqMaker",
       "registerRfqAuction",
+      "submitRfqQuoteDirect",
       "submitRfqQuote",
+      "submitRfqQuoteSigned",
       "finalizeRfqAuction",
       "cancelRfqAuction",
     ],
     protocol: [
       "register_rfq_auction",
+      "submit_rfq_quote_tx_signed",
       "submit_rfq_quote",
       "finalize_rfq_auction",
       "cancel_rfq_auction",
@@ -319,6 +339,7 @@ export function getSkewCapabilities(): {
   anchorOptionTypes: typeof SKEW_ANCHOR_OPTION_TYPES;
   payoffTypes: typeof SKEW_PAYOFF_TYPES;
   assetPayoffs: typeof SKEW_ASSET_PAYOFFS;
+  tenorPolicy: typeof SKEW_TENOR_POLICY;
   collateralRails: typeof SKEW_COLLATERAL_RAILS;
   tradeLanes: typeof SKEW_TRADE_LANES;
   routing: {
@@ -334,6 +355,7 @@ export function getSkewCapabilities(): {
     anchorOptionTypes: SKEW_ANCHOR_OPTION_TYPES,
     payoffTypes: SKEW_PAYOFF_TYPES,
     assetPayoffs: SKEW_ASSET_PAYOFFS,
+    tenorPolicy: SKEW_TENOR_POLICY,
     collateralRails: SKEW_COLLATERAL_RAILS,
     tradeLanes: SKEW_TRADE_LANES,
     routing: {

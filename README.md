@@ -15,7 +15,7 @@ keeper services that need direct protocol access without the web terminal.
 
 ## Package Surface
 
-- 91 typed methods across clearing members, option lifecycle, Instant RFQ,
+- 90+ typed methods across clearing members, option lifecycle, Instant RFQ,
   Auction RFQ, collateral vaults, liquidation, insurance fund, builder codes,
   series listings, and settlement.
 - 36 PDA helpers for bots and indexers that need deterministic account
@@ -27,7 +27,7 @@ keeper services that need direct protocol access without the web terminal.
 - Off-chain pricer clients: `getMarginBreakdown()` and `estimateFee()`, using
   the same payload shape as the terminal.
 - IV oracle access: `findPovsStatePda()` + `fetchPovs()` expose the PoVS state vector (`sigma_t`, `sigma_inf`, `theta_d`, `vrp_rel`, ATM IV, regime, tail fields). `POST /surface` turns that into the public Heston × SSVI strike/tenor grid.
-- Capability map: `getSkewCapabilities()` exposes 5 underlyings, 11 payoff names, collateral rails, and every public trade lane for dApps, bots, and MCP agents.
+- Capability map: `getSkewCapabilities()` exposes 5 underlyings, 11 payoff names, collateral rails, tenor policy, and every public trade lane for dApps, bots, and MCP agents.
 - Runtime collateral policy reader: `fetchCollateralPolicy()` reads the live mint allowlist for the current deployment. Use it before routing wSOL/jitoSOL or custom devnet mints; capabilities describe protocol support, while the policy PDA describes what this deployment actually accepts.
 - Simulation-first writes: `create({ dryRun: true })`, `create({ simulate: true })`, or `create({ simulateOnly: true })` runs create+deposit preflight and returns logs/CU without sending or consuming fees.
 - Sanitized IDL bundled at `@skew-labs/sdk/idl/skew_master.json`.
@@ -103,9 +103,11 @@ if (!policy.entries.some((e) => e.mint.equals(mySettlementMint))) {
 ## End-to-end in five lines
 
 ```typescript
+import { expiryFromTenorDays } from "@skew-labs/sdk";
+
 const cm  = await skew.registerClearingMember({ initialCollateralUsdc: 50_000 });
 const opt = await skew.create({ underlying: "BTC", payoff: "vanilla_call",
-                                strike: 80_000, expiry: "2026-05-10T16:00:00Z",
+                                strike: 80_000, expiry: expiryFromTenorDays(7),
                                 notional: 1_000 });
 const buyerSkew = SkewClient.fromProgram(conn, buyerWallet, program);
 await buyerSkew.buy(opt.address, 50); // separate buyer; creator == buyer is blocked
@@ -120,13 +122,23 @@ const preview = await skew.create({
   underlying: "SOL",
   payoff: "vanilla_inverse_call",
   strike: 180,
-  expiry: "2026-05-10T16:00:00Z",
+  expiry: expiryFromTenorDays(1),
   notional: 0.5,
   settlementMint: NATIVE_SOL_MINT,
   dryRun: true,
 });
 console.log(preview.simulation);
 ```
+
+Live create/fill paths require expiry to land on a standard asset tenor bucket:
+`1d`, `7d`, `14d`, `28d`, or `90d` from the transaction clock, with ±1h
+tolerance. Shorter binaries are not enabled in the current deployment. Bots
+should use `expiryFromTenorDays(1 | 7 | 14 | 28 | 90)` for ISO fields,
+`expiryTsFromTenorDays(...)` for raw Anchor `expiryTs: bigint` structs, or call
+`assertExpiryTenor(asset, expiryTs)` before sending. The SDK runs the same
+preflight in `create()` and `registerRfqAuction()`, so invalid tenors and
+millisecond-vs-second mistakes fail with a local error instead of an Anchor
+simulation label such as `6001`.
 
 That's the happy path. The other ~86 methods exist because real trading needs collateral top-ups, transfers, cancellations, multi-leg combos, isolated margin, liquidations, conditional orders (SL / TP / OCO), escrow-aware RFQ auctions with ed25519-verified MM quotes, 32-leg combo intents, secondary-market Dutch auctions, builder-code revenue share, series-listing keepers, LST-backed Verified-tier lockup, and the long tail of bookkeeping the on-chain program enforces.
 
@@ -212,9 +224,9 @@ Triggered exits — perm-less Pyth EMA crank fires `executeConditionalOrder` whe
 
 For immediate click-to-fill, use the relay lane:
 
-`quote_request -> quote_ack -> buyer_accept -> fill_consent -> cm_sign -> buyer_tx_request -> buyer_tx_signed -> atomic_fill_from_relay`
+`quote_request -> quote_ack -> buyer_accept_tx_signed -> fill_consent -> cm_sign -> buyer_tx_request -> buyer_tx_signed -> atomic_fill_from_relay`
 
-The SDK exports `collectInstantRfqQuotes`, `buildRelayPayload`, `relayPayloadDigest`, and `hitInstantRfqQuote` so clients do not need to emulate the removed `take_best_quote` instruction.
+The SDK exports `collectInstantRfqQuotes`, `buildRelayPayload`, `relayPayloadDigest`, and browser-safe `hitInstantRfqQuoteTxSigned` so clients do not need to emulate the removed `take_best_quote` instruction. `hitInstantRfqQuote` remains for bot/HSM clients that can produce detached message signatures.
 
 `hitInstantRfqQuote` returns `riskPreflight` after relay simulation. It includes
 the maker's exact `preImMicro -> postImMicro`, `requiredDeltaMicro`,
@@ -242,17 +254,18 @@ PM walks.
 
 ### Escrow-aware RFQ auctions (5)
 
-Buyer escrows `max_premium_micro` USDC at `register`, MMs submit ed25519-signed quotes over the canonical 80-byte digest, finalize is perm-less past `close_slot`. This is the auction/finalization lane, not 1-click HIT; immediate execution belongs to Instant RFQ above. The older single-MM `RfqAccount` path remains a full-collateral builder primitive for pre-funded listings.
+Buyer escrows `max_premium_micro` USDC at `register`, browser MMs submit tx-signed quotes, bots/HSMs can submit Ed25519-signed quotes over the canonical 80-byte digest, and finalize is perm-less past `close_slot`. This is the auction/finalization lane, not 1-click HIT; immediate execution belongs to Instant RFQ above. The older single-MM `RfqAccount` path remains a full-collateral builder primitive for pre-funded listings.
 
 | Method | Anchor ix |
 |---|---|
 | `registerRfqMaker()` | `register_rfq_maker` (per-MM anti-spam deposit) |
 | `registerRfqAuction({ auctionId, optionSpec, maxPremiumUsdc, durationSlots })` | `register_rfq_auction` (buyer escrows USDC + opens N-MM window) |
-| `submitRfqQuote({ auction, premiumMicro, validUntilSlot, mmSignature })` | `submit_rfq_quote` — builds 2-ix tx `[Ed25519Program.createInstructionWithPublicKey, submit_rfq_quote]` so the on-chain handler can verify the digest via the Instructions sysvar |
+| `submitRfqQuoteDirect({ auction, premiumMicro, validUntilSlot })` | `submit_rfq_quote_tx_signed` — browser wallet lane; normal tx signature only, no `signMessage` |
+| `submitRfqQuoteSigned({ auction, premiumMicro, validUntilSlot, mmSignature })` | `submit_rfq_quote` — bot/HSM lane; builds 2-ix tx `[Ed25519Program.createInstructionWithPublicKey, submit_rfq_quote]` so the on-chain handler can verify the digest via the Instructions sysvar |
 | `finalizeRfqAuction({ auction, winningMm? })` | `finalize_rfq_auction` (perm-less past `close_slot`; publishes winner/refund event state; click-to-fill uses Instant RFQ relay atomic fill) |
 | `cancelRfqAuction(auction)` | `cancel_rfq_auction` (buyer-initiated; full escrow refund) |
 
-The pure helper `rfqQuoteDigest(auction, premiumMicro, validUntilSlot, mm) → Buffer` mirrors the on-chain construction byte-for-byte. Sign that with the MM's keypair and pass the resulting signature into `submitRfqQuote`. (See [§ rfqQuoteDigest](#ed25519-rfq-quote-digest) below.)
+The pure helpers `rfqQuoteDigestBytes` / `rfqQuoteDigestHex` mirror the on-chain construction byte-for-byte for the delegated bot/HSM lane. Browser UIs should prefer `submitRfqQuoteDirect`. (See [§ rfqQuoteDigest](#ed25519-rfq-quote-digest) below.)
 
 ### Combo intent v2 (4)
 
@@ -389,15 +402,15 @@ SHA256( auction_pubkey ‖ premium_micro_LE ‖ valid_until_slot_LE ‖ mm_pubke
 The SDK exposes a pure helper that mirrors the on-chain construction byte-for-byte:
 
 ```typescript
-import { rfqQuoteDigest } from "@skew-labs/sdk";
+import { rfqQuoteDigestBytes } from "@skew-labs/sdk";
 import { sign } from "@noble/ed25519";
 
-const digest: Buffer = rfqQuoteDigest(auctionPda, premiumMicro, validUntilSlot, mmPubkey);
+const digest = rfqQuoteDigestBytes(auctionPda, premiumMicro, validUntilSlot, mmPubkey);
 const sig: Uint8Array = await sign(digest, mmSecretKey);
-await skew.submitRfqQuote({ auction: auctionPda, premiumMicro, validUntilSlot, mmSignature: sig });
+await skew.submitRfqQuoteSigned({ auction: auctionPda, premiumMicro, validUntilSlot, mmSignature: sig });
 ```
 
-Returns `Buffer` (Node) — convert to `Uint8Array` for browser ed25519 libraries that don't accept Buffer directly.
+`rfqQuoteDigest()` remains as a compatibility Buffer-returning alias; new browser-facing code should use the `Uint8Array` helper.
 
 ---
 
@@ -422,7 +435,7 @@ await skew.create({
 
 Instant RFQ WebSocket:
 - Endpoint: `wss://skew-relay-devnet.fly.dev/subscribe`
-- `quote_request` collects CM quotes; `buyer_accept` + `cm_sign` prepares the fill tx; `buyer_tx_signed` lands `atomic_fill_from_relay`
+- `quote_request` collects CM quotes; `buyer_accept_tx_signed` + `cm_sign` prepares the fill tx; `buyer_tx_signed` lands `atomic_fill_from_relay`
 - Fixed 100-byte `RelayPayload` + digest helpers ship from `@skew-labs/sdk`
 - Catalog: [`docs/runbooks/relay-protocol.md`](../docs/runbooks/relay-protocol.md)
 

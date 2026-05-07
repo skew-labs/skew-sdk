@@ -10,6 +10,40 @@ export declare function resolvePythFeed(underlying: Underlying): PublicKey;
  * BTC=0, ETH=1, SOL=2, XRP=3, HYPE=4 (launch list).
  */
 export declare function assetEnumIndex(underlying: Underlying): number;
+export declare const STANDARD_TENOR_DAYS: readonly [1, 7, 14, 28, 90];
+export type StandardTenorDays = (typeof STANDARD_TENOR_DAYS)[number];
+export declare const TENOR_TOLERANCE_SECONDS = 3600;
+export declare const SKEW_ALLOWED_TENORS_BY_UNDERLYING: Record<Underlying, readonly StandardTenorDays[]>;
+export interface AssertExpiryTenorOptions {
+    nowSeconds?: number;
+    context?: string;
+}
+/**
+ * Return an ISO timestamp exactly N standard tenor days from now.
+ *
+ * Use this in bots instead of `Date.now() + hours`. For example:
+ *
+ * ```ts
+ * const expiry = expiryFromTenorDays(7);
+ * await skew.create({ underlying: "BTC", expiry, ... });
+ * ```
+ */
+export declare function expiryFromTenorDays(days: StandardTenorDays, nowMs?: number): string;
+/**
+ * Return unix seconds exactly N standard tenor days from now.
+ *
+ * This is the safer helper for low-level RFQ structs where Anchor expects
+ * `expiryTs: bigint`. Do not pass `Date.now()` milliseconds to those fields.
+ */
+export declare function expiryTsFromTenorDays(days: StandardTenorDays, nowMs?: number): bigint;
+/**
+ * SDK preflight for the on-chain AssetParams tenor buckets.
+ *
+ * Returns the matched tenor day. Throws before a transaction is built if the
+ * expiry is off-bucket, so bots see a precise SDK error instead of an Anchor
+ * simulation failure such as `6001`.
+ */
+export declare function assertExpiryTenor(underlyingOrAsset: Underlying | number, expiryTs: bigint | number, options?: AssertExpiryTenorOptions): StandardTenorDays;
 /** Encode buy/sell direction as the anchor wire i8 (+1 / -1). */
 export declare function directionToI8(direction: Direction): number;
 type AnchorOptionType = Record<string, any>;
@@ -314,6 +348,8 @@ export declare function findComboIntentV2Pda(buyer: PublicKey, comboId: bigint, 
  * `current_index - 1` in the same tx as `submit_rfq_quote`. The on-chain
  * handler reads the Instructions sysvar and verifies the signature.
  */
+export declare function rfqQuoteDigestBytes(auction: PublicKey, premiumMicro: bigint, validUntilSlot: bigint, mm: PublicKey): Uint8Array;
+export declare function rfqQuoteDigestHex(auction: PublicKey, premiumMicro: bigint, validUntilSlot: bigint, mm: PublicKey): string;
 export declare function rfqQuoteDigest(auction: PublicKey, premiumMicro: bigint, validUntilSlot: bigint, mm: PublicKey): Buffer;
 export {};
 //# sourceMappingURL=pda.d.ts.map

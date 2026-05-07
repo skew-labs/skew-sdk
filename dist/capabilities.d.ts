@@ -19,7 +19,13 @@ export interface SkewTradeLaneCapability {
     summary: string;
     note: string;
 }
-export declare const SKEW_CAPABILITIES_VERSION: "2026-05-06";
+export interface SkewTenorPolicy {
+    onChainBucketsDays: readonly number[];
+    toleranceSeconds: number;
+    minimumBucketDays: number;
+    note: string;
+}
+export declare const SKEW_CAPABILITIES_VERSION: "2026-05-07";
 export declare const SKEW_UNDERLYINGS: readonly ["BTC", "ETH", "SOL", "XRP", "HYPE"];
 export declare const SKEW_ANCHOR_OPTION_TYPES: readonly ["Vanilla", "Digital", "CappedVanilla", "RangeAccrual", "VanillaInverse", "DigitalInverse"];
 export declare const SKEW_PAYOFF_TYPES: readonly ["digital_call", "digital_put", "vanilla_call", "vanilla_put", "capped_call", "capped_put", "range_accrual", "vanilla_inverse_call", "vanilla_inverse_put", "digital_inverse_call", "digital_inverse_put"];
@@ -29,6 +35,12 @@ export declare const SKEW_ASSET_PAYOFFS: {
     readonly SOL: readonly ["digital_call", "digital_put", "vanilla_call", "vanilla_put", "capped_call", "capped_put", "range_accrual", "vanilla_inverse_call", "vanilla_inverse_put", "digital_inverse_call", "digital_inverse_put"];
     readonly XRP: readonly ["digital_call", "digital_put", "vanilla_call", "vanilla_put", "capped_call", "capped_put"];
     readonly HYPE: readonly ["digital_call", "digital_put", "vanilla_call", "vanilla_put"];
+};
+export declare const SKEW_TENOR_POLICY: {
+    readonly onChainBucketsDays: readonly [1, 7, 14, 28, 90];
+    readonly toleranceSeconds: 3600;
+    readonly minimumBucketDays: 1;
+    readonly note: "Live on-chain create/fill paths require expiry to land inside one of the standard asset tenor buckets, with ±1h tolerance. Sub-1d binaries are intentionally not enabled in the current deployment.";
 };
 export declare const SKEW_COLLATERAL_RAILS: readonly [{
     readonly symbol: "USDC";
@@ -57,18 +69,18 @@ export declare const SKEW_TRADE_LANES: readonly [{
     readonly label: "Instant RFQ HIT";
     readonly status: "live";
     readonly primary: true;
-    readonly entrypoints: readonly ["collectInstantRfqQuotes", "buildRelayPayload", "relayPayloadDigest", "hitInstantRfqQuote"];
-    readonly protocol: readonly ["quote_request", "quote_ack", "buyer_accept", "fill_consent", "cm_sign", "buyer_tx_request", "buyer_tx_signed", "atomic_fill_from_relay"];
+    readonly entrypoints: readonly ["collectInstantRfqQuotes", "buildRelayPayload", "relayPayloadDigest", "hitInstantRfqQuoteTxSigned", "hitInstantRfqQuote"];
+    readonly protocol: readonly ["quote_request", "quote_ack", "buyer_accept_tx_signed", "buyer_accept", "fill_consent", "cm_sign", "buyer_tx_request", "buyer_tx_signed", "atomic_fill_from_relay"];
     readonly settlement: readonly ["USDC", "wSOL", "jitoSOL"];
-    readonly summary: "Buyer hits a live CM quote; buyer and CM sign the same RelayPayload digest; relay submits atomic_fill_from_relay.";
+    readonly summary: "Buyer hits a live CM quote; browser buyers sign the final fill transaction, while bot/HSM buyers may additionally sign the RelayPayload digest. CM quotes remain digest-signed.";
     readonly note: "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills. Do not emulate take_best_quote; it is not in the current IDL.";
 }, {
     readonly id: "auction_rfq";
     readonly label: "Auction RFQ";
     readonly status: "keeper-assisted";
     readonly primary: true;
-    readonly entrypoints: readonly ["registerRfqMaker", "registerRfqAuction", "submitRfqQuote", "finalizeRfqAuction", "cancelRfqAuction"];
-    readonly protocol: readonly ["register_rfq_auction", "submit_rfq_quote", "finalize_rfq_auction", "cancel_rfq_auction"];
+    readonly entrypoints: readonly ["registerRfqMaker", "registerRfqAuction", "submitRfqQuoteDirect", "submitRfqQuote", "submitRfqQuoteSigned", "finalizeRfqAuction", "cancelRfqAuction"];
+    readonly protocol: readonly ["register_rfq_auction", "submit_rfq_quote_tx_signed", "submit_rfq_quote", "finalize_rfq_auction", "cancel_rfq_auction"];
     readonly settlement: readonly ["USDC"];
     readonly summary: "Buyer escrows a max premium, multiple MMs compete with ed25519-signed quotes, and finalization records the winning quote/refund state.";
     readonly note: "Auction RFQ is price discovery and finalization. Immediate execution should route through Instant RFQ atomic fill.";
@@ -149,6 +161,7 @@ export declare function getSkewCapabilities(): {
     anchorOptionTypes: typeof SKEW_ANCHOR_OPTION_TYPES;
     payoffTypes: typeof SKEW_PAYOFF_TYPES;
     assetPayoffs: typeof SKEW_ASSET_PAYOFFS;
+    tenorPolicy: typeof SKEW_TENOR_POLICY;
     collateralRails: typeof SKEW_COLLATERAL_RAILS;
     tradeLanes: typeof SKEW_TRADE_LANES;
     routing: {
