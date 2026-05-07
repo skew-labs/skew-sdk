@@ -1,23 +1,21 @@
 import { PublicKey } from "@solana/web3.js";
+import { sha256 } from "@noble/hashes/sha256";
 import type { CreateParams, Direction, PayoffType, Underlying } from "./types";
 
-export const SKEW_PROGRAM_ID = new PublicKey(
-  "3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK",
-);
+export const SKEW_PROGRAM_ID = new PublicKey("3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK");
 
 // ---------------------------------------------------------------------------
-// Pyth devnet feeds (launch panel).
-// HYPE feed pending Wormhole / Pyth integration (~2026-Q2). Until then,
-// resolvePythFeed("HYPE") falls back to the Pyth Hermes REST API and the
-// instruction is rejected on-chain (UnsupportedAsset).
-// Source: docs from `agents/inbox/infra-pyth-v3-5asset-feed-ids.md`.
+// Pyth devnet push-oracle feeds (launch panel).
+// Devnet-frozen builds still use the 111... sentinel for HYPE because there is
+// no devnet push account; the live Hermes pull feed is wired below for spot
+// stamps, pricing, MCP, and terminal data.
 // ---------------------------------------------------------------------------
 const PYTH_DEVNET_FEEDS: Record<Underlying, string> = {
   BTC: "HovQMDrbAgAYPCmHVSrezcSmkMtXSSUsLDFANExrZh2J",
   ETH: "EdVCmQ9FSPcVe5YySXDPCRmc8aDQLKJ9xvYBMZPie1Vw",
   SOL: "J83w4HKfqxwcq3BEMMkPFSppX3gqekLyLJBexebFVkix",
   XRP: "Hr1bjp5Ux8ezmNJ3ZH4kHk52R2hSzEUtX84mr7CG6jip",
-  HYPE: "11111111111111111111111111111111", // Placeholder — pending Wormhole 2026-Q2
+  HYPE: "11111111111111111111111111111111", // Devnet-frozen sentinel; Hermes pull feed is live
 };
 
 // Hermes REST symbol IDs for spot price fetch (V0 stamp default).
@@ -26,14 +24,14 @@ const HERMES_FEED_IDS: Record<Underlying, string> = {
   ETH: "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
   SOL: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
   XRP: "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
-  HYPE: "", // pending
+  HYPE: "4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
 };
 
 /** Default annualized σ used as the V0 stamp when caller doesn't supply one. */
 export const ASSET_DEFAULT_SIGMA: Record<Underlying, number> = {
   BTC: 0.45,
   ETH: 0.65,
-  SOL: 0.80,
+  SOL: 0.8,
   XRP: 0.75,
   HYPE: 0.85,
 };
@@ -61,9 +59,9 @@ export function directionToI8(direction: Direction): number {
 // ---------------------------------------------------------------------------
 // PayoffType → anchor OptionType + direction + extra_param mapping
 //
-// Anchor IDL `OptionType` has 3 variants (Digital / CappedVanilla / RangeAccrual)
-// after Decision-32 OneTouch DROP. The SDK's seven user-friendly payoff names
-// map onto (option_type, default direction, extra_param) triples here.
+// Anchor IDL `OptionType` has 6 storage variants after the inverse-family
+// addition. The SDK's 11 user-friendly payoff names map onto
+// (option_type, default direction, extra_param) triples here.
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,14 +85,17 @@ const PAYOFF_TABLE: Record<PayoffType, PayoffMapping> = {
     extraParam: () => 0,
   },
   vanilla_call: {
-    // Capped vanilla with no upper cap. Anchor treats `extra_param=0` on a
-    // call as "no cap"; on a put as "no floor". Keep symmetric default 0.
-    optionType: { cappedVanilla: {} },
+    // Phase 2 (2026-05-04): on-chain `Vanilla` is its own enum variant — route
+    // here directly instead of `cappedVanilla` with extra_param=0. Critical:
+    // pre-Phase-2 mapping mis-routed all vanilla writes to CappedVanilla → IM
+    // model picked Theorem 1 (bounded) instead of ScanRisk-only (Vanilla short
+    // call unbounded), under-charging short call IM.
+    optionType: { vanilla: {} },
     defaultDirection: "buy",
     extraParam: () => 0,
   },
   vanilla_put: {
-    optionType: { cappedVanilla: {} },
+    optionType: { vanilla: {} },
     defaultDirection: "sell",
     extraParam: () => 0,
   },
@@ -122,11 +123,33 @@ const PAYOFF_TABLE: Record<PayoffType, PayoffMapping> = {
     extraParam: (p) => {
       const upper = p.upperBound ?? p.extraParam;
       if (upper === undefined)
-        throw new Error(
-          "range_accrual requires upperBound (or extraParam) — upper bound USD",
-        );
+        throw new Error("range_accrual requires upperBound (or extraParam) — upper bound USD");
       return upper;
     },
+  },
+  // Phase 2 (2026-05-04) — Inverse family. Premium + payoff in BASE asset.
+  // On-chain enum has one variant per (Vanilla|Digital)Inverse with direction
+  // carried as i8 (+1 Call / −1 Put). SOL enables the inverse family today;
+  // other assets remain linear-only until their AssetParams masks are widened.
+  vanilla_inverse_call: {
+    optionType: { vanillaInverse: {} },
+    defaultDirection: "buy",
+    extraParam: () => 0,
+  },
+  vanilla_inverse_put: {
+    optionType: { vanillaInverse: {} },
+    defaultDirection: "sell",
+    extraParam: () => 0,
+  },
+  digital_inverse_call: {
+    optionType: { digitalInverse: {} },
+    defaultDirection: "buy",
+    extraParam: () => 0,
+  },
+  digital_inverse_put: {
+    optionType: { digitalInverse: {} },
+    defaultDirection: "sell",
+    extraParam: () => 0,
   },
 };
 
@@ -151,11 +174,9 @@ interface HermesParsedPrice {
  * Used by `SkewClient.create()` when the caller doesn't supply spotAtCreation.
  *
  * Returns a USD float (e.g. 77645.20 for BTC). Throws on network error or
- * unsupported asset (HYPE pre-Wormhole).
+ * missing Hermes feed configuration.
  */
-export async function fetchPythSpotUsd(
-  underlying: Underlying,
-): Promise<number> {
+export async function fetchPythSpotUsd(underlying: Underlying): Promise<number> {
   const feedId = HERMES_FEED_IDS[underlying];
   if (!feedId) {
     throw new Error(
@@ -163,9 +184,7 @@ export async function fetchPythSpotUsd(
         `Pass \`spotAtCreation\` explicitly or wait for integration.`,
     );
   }
-  const url =
-    "https://hermes.pyth.network/v2/updates/price/latest" +
-    `?ids%5B%5D=${feedId}`;
+  const url = "https://hermes.pyth.network/v2/updates/price/latest" + `?ids%5B%5D=${feedId}`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(
@@ -193,6 +212,8 @@ const FEE_ACCUMULATOR_SEED = Buffer.from("fee_accumulator");
 const FEE_AUTHORITY_SEED = Buffer.from("fee_authority");
 const CM_SEED = Buffer.from("cm");
 const CM_ESCROW_SEED = Buffer.from("cm_escrow");
+const POSITION_REGISTRY_SEED = Buffer.from("position_registry");
+const COLLATERAL_POLICY_SEED = Buffer.from("collateral_policy");
 const MICROSTRUCTURE_SEED = Buffer.from("microstructure");
 const CROSS_ASSET_MATRIX_SEED = Buffer.from("cross_asset_matrix");
 const HAMILTON_SEED = Buffer.from("hamilton");
@@ -202,6 +223,221 @@ const INSURANCE_FUND_SEED = Buffer.from("insurance_fund");
 const IF_ESCROW_SEED = Buffer.from("if_escrow");
 const GOVERNANCE_SEED = Buffer.from("governance");
 const SIGMA_IV_SEED = Buffer.from("sigma_iv");
+// Phase 1635 — Isolated Margin per-position vault
+const ISOLATED_VAULT_SEED = Buffer.from("isolated_vault");
+const ISOLATED_VAULT_ATA_SEED = Buffer.from("isolated_vault_ata");
+// Phase 1636 — DVOL variance index
+const DVOL_SEED = Buffer.from("dvol");
+// Phase 1633.G — Mainnet hardening (conditional orders, RFQ auctions, combo v2)
+const CONDITIONAL_ORDER_SEED = Buffer.from("cond_order");
+const RFQ_AUCTION_SEED = Buffer.from("rfq_auction");
+const RFQ_AUCTION_ESCROW_SEED = Buffer.from("rfq_escrow");
+const RFQ_MAKER_REGISTRY_SEED = Buffer.from("rfq_maker");
+const COMBO_INTENT_V2_SEED = Buffer.from("combo_intent_v2");
+// Phase 1637 — Multi-leg combo intent
+const COMBO_INTENT_SEED = Buffer.from("combo_intent");
+const COMBO_ESCROW_SEED = Buffer.from("combo_escrow");
+// Phase 1633.LST — jitoSOL collateral per-(user, mint) vault
+const LST_VAULT_SEED = Buffer.from("lst_vault");
+const LST_VAULT_ATA_SEED = Buffer.from("lst_vault_ata");
+// Phase 1A.2 (2026-05-04) — Native SOL collateral vault seeds.
+const NATIVE_SOL_VAULT_SEED = Buffer.from("native_sol_vault");
+const NATIVE_SOL_VAULT_ATA_SEED = Buffer.from("native_sol_vault_ata");
+const OPTION_COLLATERAL_LOCK_SEED = Buffer.from("option_collateral_lock");
+// Phase 1633.G — per-asset SkewMetricsPda (RR/BF/term structure crank)
+const SKEW_METRICS_SEED = Buffer.from("skew_metrics");
+const VOLUME_TRACKER_SEED = Buffer.from("volume");
+const FEE_CONFIG_SEED = Buffer.from("fee_config");
+
+/**
+ * Per-asset SkewMetrics PDA — RR25 / BF25 / RR10 / ATM slope + 8-tenor IV.
+ * Cranked hourly by SKEW_AUTHORITY via `update_skew_metrics`.
+ * Seeds: [b"skew_metrics", &[asset_u8]]
+ */
+export function findSkewMetricsPda(
+  assetIdx: number,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  assertAssetIdx("findSkewMetricsPda", assetIdx);
+  return PublicKey.findProgramAddressSync([SKEW_METRICS_SEED, Buffer.from([assetIdx])], programId);
+}
+
+// Series listing — σ·√T grid metadata index PDA
+const SERIES_LISTING_SEED = Buffer.from("series");
+// Builder code anti-spam deposit registry
+const BUILDER_SEED = Buffer.from("builder");
+const BUILDER_ESCROW_SEED = Buffer.from("builder_escrow");
+// Secondary-market auction escrow
+const AUCTION_SEED = Buffer.from("auction");
+const AUCTION_ESCROW_SEED = Buffer.from("auction_escrow");
+
+/**
+ * Per-series-cell grid metadata PDA.
+ * Seeds: [b"series", &[asset], strike_le, expiry_ts_le, &[option_type], direction_le]
+ *
+ * @param optionTypeIdx — discriminant: Vanilla=0, Digital=1,
+ *   CappedVanilla=2, RangeAccrual=3, VanillaInverse=4, DigitalInverse=5
+ * @param direction — +1 Call / -1 Put / 0 RangeAccrual (i8 — encoded as 1-byte LE)
+ */
+export function findSeriesListingPda(
+  assetIdx: number,
+  strike: bigint,
+  expiryTs: bigint,
+  optionTypeIdx: 0 | 1 | 2 | 3 | 4 | 5,
+  direction: -1 | 0 | 1,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  assertAssetIdx("findSeriesListingPda", assetIdx);
+  const strikeBuf = Buffer.alloc(8);
+  strikeBuf.writeBigUInt64LE(strike);
+  const expiryBuf = Buffer.alloc(8);
+  expiryBuf.writeBigInt64LE(expiryTs);
+  // i8 → unsigned 1-byte (matches `direction.to_le_bytes()` for i8 on chain).
+  const dirByte = (direction & 0xff) as number;
+  return PublicKey.findProgramAddressSync(
+    [
+      SERIES_LISTING_SEED,
+      Buffer.from([assetIdx]),
+      strikeBuf,
+      expiryBuf,
+      Buffer.from([optionTypeIdx]),
+      Buffer.from([dirByte]),
+    ],
+    programId,
+  );
+}
+
+/**
+ * Per-builder anti-spam deposit registry PDA.
+ * Seeds: [b"builder", builder_pubkey]
+ */
+export function findBuilderCodePda(
+  builder: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([BUILDER_SEED, builder.toBuffer()], programId);
+}
+
+/**
+ * Per-builder refundable-deposit + accrued-fee escrow PDA.
+ * Seeds: [b"builder_escrow", builder_pubkey]
+ */
+export function findBuilderEscrowPda(
+  builder: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([BUILDER_ESCROW_SEED, builder.toBuffer()], programId);
+}
+
+/**
+ * Per-option secondary-market auction PDA.
+ * Seeds: [b"auction", option_pda]
+ */
+export function findAuctionPda(
+  optionPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([AUCTION_SEED, optionPda.toBuffer()], programId);
+}
+
+/**
+ * Per-auction option-token escrow ATA (authority = auction PDA).
+ * Seeds: [b"auction_escrow", auction_pda]
+ */
+export function findAuctionEscrowPda(
+  auctionPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([AUCTION_ESCROW_SEED, auctionPda.toBuffer()], programId);
+}
+
+/**
+ * jitoSOL SPL Token mint on Solana mainnet — `Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb`
+ * is the stake-pool program (LST manager); the actual mint is below.
+ * Source: skew-master constants/mod.rs:1158.
+ */
+export const JITOSOL_MINT = new PublicKey("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn");
+
+/**
+ * Phase 1A.2 (2026-05-04) — Wrapped SOL (wSOL) mint.
+ * Production canonical native_mint per Solana SPL token convention.
+ * Used by `init_native_sol_vault` / deposit / withdraw paths.
+ * Source: skew-master src/state/native_sol_vault.rs:NATIVE_SOL_MINT.
+ */
+export const NATIVE_SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
+
+/**
+ * jitoSOL Stake Pool account. Address-pinned by the on-chain
+ * `upgrade_tier` handler so a malicious caller cannot swap a fake
+ * stake pool that reports an inflated exchange rate.
+ * Source: skew-master constants/mod.rs:1154.
+ */
+export const JITOSOL_STAKE_POOL = new PublicKey("Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb");
+
+/**
+ * Pyth SOL/USD feed used for LST USD-value computation in
+ * `upgrade_tier`. Address-pinned on-chain.
+ * Source: skew-master constants/mod.rs:1171 (devnet).
+ */
+export const PYTH_SOL_USD_FEED = new PublicKey("J83w4HKfqxwcq3BEMMkPFSppX3gqekLyLJBexebFVkix");
+
+/**
+ * Per-(user, lst_mint) LST collateral vault PDA.
+ * Seeds: [b"lst_vault", user, lst_mint]
+ */
+export function findLstVaultPda(
+  user: PublicKey,
+  lstMint: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [LST_VAULT_SEED, user.toBuffer(), lstMint.toBuffer()],
+    programId,
+  );
+}
+
+/**
+ * Per-vault LST escrow ATA. Authority = LstVault PDA.
+ * Seeds: [b"lst_vault_ata", vault_pda]
+ */
+export function findLstVaultEscrowPda(
+  vaultPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LST_VAULT_ATA_SEED, vaultPda.toBuffer()], programId);
+}
+
+/**
+ * Phase 1A.2 (2026-05-04) — Per-user Native SOL collateral vault PDA.
+ * Seeds: [b"native_sol_vault", user]
+ *
+ * Single-mint vault (no `mint` dimension; canonical wSOL only). ETF APs +
+ * regulated US institutions cannot hold LSTs for compliance reasons; this
+ * path lets them post Native SOL while retaining Skew's portfolio margin.
+ *
+ * Spec: V2_SOL_NATIVE_OPTIONS_PLAN_2026-05-04.md §5.
+ */
+export function findNativeSolVaultPda(
+  user: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([NATIVE_SOL_VAULT_SEED, user.toBuffer()], programId);
+}
+
+/**
+ * Phase 1A.2 — Per-vault Native SOL escrow ATA (holds wSOL).
+ * Authority = NativeSolVault PDA.
+ * Seeds: [b"native_sol_vault_ata", vault_pda]
+ */
+export function findNativeSolVaultEscrowPda(
+  vaultPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [NATIVE_SOL_VAULT_ATA_SEED, vaultPda.toBuffer()],
+    programId,
+  );
+}
 
 export function findOptionPda(
   creator: PublicKey,
@@ -210,28 +446,26 @@ export function findOptionPda(
 ): [PublicKey, number] {
   const buf = Buffer.alloc(8);
   buf.writeBigUInt64LE(nonce);
-  return PublicKey.findProgramAddressSync(
-    [OPTION_SEED, creator.toBuffer(), buf],
-    programId,
-  );
+  return PublicKey.findProgramAddressSync([OPTION_SEED, creator.toBuffer(), buf], programId);
 }
 
-export function findEscrowPda(
-  option: PublicKey,
-  programId = SKEW_PROGRAM_ID,
-): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [ESCROW_SEED, option.toBuffer()],
-    programId,
-  );
+export function findEscrowPda(option: PublicKey, programId = SKEW_PROGRAM_ID): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([ESCROW_SEED, option.toBuffer()], programId);
 }
 
 export function findOptionTokenMintPda(
   option: PublicKey,
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([OPTION_TOKEN_MINT_SEED, option.toBuffer()], programId);
+}
+
+export function findOptionCollateralLockPda(
+  option: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [OPTION_TOKEN_MINT_SEED, option.toBuffer()],
+    [OPTION_COLLATERAL_LOCK_SEED, option.toBuffer()],
     programId,
   );
 }
@@ -246,9 +480,7 @@ export function findFeeAccumulatorPda(
   );
 }
 
-export function findFeeAuthorityPda(
-  programId = SKEW_PROGRAM_ID,
-): [PublicKey, number] {
+export function findFeeAuthorityPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([FEE_AUTHORITY_SEED], programId);
 }
 
@@ -260,10 +492,7 @@ export function findClearingMemberPda(
   authority: PublicKey,
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [CM_SEED, authority.toBuffer()],
-    programId,
-  );
+  return PublicKey.findProgramAddressSync([CM_SEED, authority.toBuffer()], programId);
 }
 
 /**
@@ -275,10 +504,42 @@ export function findCmEscrowPda(
   cmPda: PublicKey,
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([CM_ESCROW_SEED, cmPda.toBuffer()], programId);
+}
+
+/**
+ * Canonical per-CM PM position registry PDA.
+ * Seeds: [b"position_registry", authority]
+ */
+export function findPositionRegistryPda(
+  authority: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [CM_ESCROW_SEED, cmPda.toBuffer()],
+    [POSITION_REGISTRY_SEED, authority.toBuffer()],
     programId,
   );
+}
+
+/** Singleton settlement/collateral mint allowlist PDA. */
+export function findCollateralPolicyPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([COLLATERAL_POLICY_SEED], programId);
+}
+
+/**
+ * 30-day rolling fee-volume tracker PDA.
+ * Seeds: [b"volume", authority]
+ */
+export function findVolumeTrackerPda(
+  authority: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([VOLUME_TRACKER_SEED, authority.toBuffer()], programId);
+}
+
+/** Singleton fee schedule config PDA. */
+export function findFeeConfigPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([FEE_CONFIG_SEED], programId);
 }
 
 /**
@@ -308,9 +569,7 @@ export function findMicrostructurePda(
  *
  * Seeds: [b"cross_asset_matrix"]
  */
-export function findCrossAssetMatrixPda(
-  programId = SKEW_PROGRAM_ID,
-): [PublicKey, number] {
+export function findCrossAssetMatrixPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([CROSS_ASSET_MATRIX_SEED], programId);
 }
 
@@ -328,10 +587,7 @@ export function findHamiltonPda(
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
   assertAssetIdx("findHamiltonPda", assetIdx);
-  return PublicKey.findProgramAddressSync(
-    [HAMILTON_SEED, Buffer.from([assetIdx])],
-    programId,
-  );
+  return PublicKey.findProgramAddressSync([HAMILTON_SEED, Buffer.from([assetIdx])], programId);
 }
 
 /**
@@ -348,17 +604,12 @@ export function findPovsStatePda(
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
   assertAssetIdx("findPovsStatePda", assetIdx);
-  return PublicKey.findProgramAddressSync(
-    [POVS_STATE_SEED, Buffer.from([assetIdx])],
-    programId,
-  );
+  return PublicKey.findProgramAddressSync([POVS_STATE_SEED, Buffer.from([assetIdx])], programId);
 }
 
 function assertAssetIdx(fn: string, assetIdx: number): void {
   if (assetIdx < 0 || assetIdx > 4 || !Number.isInteger(assetIdx)) {
-    throw new Error(
-      `${fn}: assetIdx must be 0..4 (5-asset enum), got ${assetIdx}`,
-    );
+    throw new Error(`${fn}: assetIdx must be 0..4 (5-asset enum), got ${assetIdx}`);
   }
 }
 
@@ -370,36 +621,43 @@ export function findLiqStatePda(
   optionPda: PublicKey,
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [LIQ_STATE_SEED, optionPda.toBuffer()],
-    programId,
-  );
+  return PublicKey.findProgramAddressSync([LIQ_STATE_SEED, optionPda.toBuffer()], programId);
 }
 
 /**
  * Singleton InsuranceFund PDA — protocol's last-resort capital pool.
  * Seeds: [b"insurance_fund"]
  */
-export function findInsuranceFundPda(
+export function findInsuranceFundPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([INSURANCE_FUND_SEED], programId);
+}
+
+/**
+ * Phase 57301 (2026-05-04) — MakerAxe PDA. MM 인벤토리 의향 board entry.
+ * Seeds: [b"axe", mm, &axe_id.to_le_bytes()]
+ */
+export const MAKER_AXE_SEED = Buffer.from("axe");
+
+export function findMakerAxePda(
+  mm: PublicKey,
+  axeId: bigint,
   programId = SKEW_PROGRAM_ID,
 ): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([INSURANCE_FUND_SEED], programId);
+  const idLe = Buffer.alloc(8);
+  idLe.writeBigUInt64LE(axeId);
+  return PublicKey.findProgramAddressSync([MAKER_AXE_SEED, mm.toBuffer(), idLe], programId);
 }
 
 /**
  * Singleton InsuranceFund SPL escrow — token account holding the fund's USDC.
  * Seeds: [b"if_escrow"]
  */
-export function findIfEscrowPda(
-  programId = SKEW_PROGRAM_ID,
-): [PublicKey, number] {
+export function findIfEscrowPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([IF_ESCROW_SEED], programId);
 }
 
 /** Singleton GovernanceMultisig PDA. Seeds: [b"governance"]. */
-export function findGovernancePda(
-  programId = SKEW_PROGRAM_ID,
-): [PublicKey, number] {
+export function findGovernancePda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([GOVERNANCE_SEED], programId);
 }
 
@@ -407,9 +665,7 @@ export function findGovernancePda(
  * Singleton SigmaIvPda — Deribit IV crank writes all 5-asset IVs here.
  * Seeds: [b"sigma_iv"]. Single PDA, not per-asset.
  */
-export function findSigmaIvPda(
-  programId = SKEW_PROGRAM_ID,
-): [PublicKey, number] {
+export function findSigmaIvPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([SIGMA_IV_SEED], programId);
 }
 
@@ -430,6 +686,34 @@ export function toUsdcUnits(usd: number): bigint {
   return BigInt(Math.floor(usd * 1_000_000));
 }
 
+export function settlementMintDecimals(mint: PublicKey): 6 | 9 {
+  return mint.equals(JITOSOL_MINT) || mint.equals(NATIVE_SOL_MINT) ? 9 : 6;
+}
+
+export function toSettlementUnits(amount: number, mint: PublicKey): bigint {
+  const decimals = settlementMintDecimals(mint);
+  return BigInt(Math.floor(amount * 10 ** decimals));
+}
+
+/** Inverse of `toOnChainStrike`: divide a Pyth-scaled u64 by 10^8 to USD. */
+export function fromOnChainStrike(strike: bigint): number {
+  return Number(strike) / 100_000_000;
+}
+
+/** Inverse of `toUsdcUnits`: divide a USDC × 10^6 u64 by 10^6 to USD. */
+export function fromUsdcUnits(units: bigint): number {
+  return Number(units) / 1_000_000;
+}
+
+/**
+ * Reverse of `assetEnumIndex` — map the on-chain `asset: u8` back to its
+ * launch-panel symbol. Returns `undefined` for indices outside 0..4 so
+ * callers can decide between "unknown" vs. "default".
+ */
+export function indexToUnderlying(idx: number): Underlying | undefined {
+  return (["BTC", "ETH", "SOL", "XRP", "HYPE"] as const)[idx];
+}
+
 export function isoToUnixSeconds(iso: string): bigint {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) throw new Error(`Invalid ISO date: ${iso}`);
@@ -442,11 +726,219 @@ export const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey(
 
 export function findMetadataPda(mint: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("metadata"),
-      MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(),
-      mint.toBuffer(),
-    ],
+    [Buffer.from("metadata"), MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
     MPL_TOKEN_METADATA_PROGRAM_ID,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1635 — Isolated Margin per-position USDC vault PDAs
+//
+// Per-(user, option) PDA + escrow ATA. A position's loss caps at the vault
+// balance instead of cascading across the writer's ClearingMember collateral.
+// On-chain settle/liquidate drains the vault FIRST when the matching
+// (vault_pda, vault_escrow_ata) pair is passed via remaining_accounts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-(user, option) IsolatedVault PDA.
+ * Seeds: [b"isolated_vault", user, option_pda]
+ */
+export function findIsolatedVaultPda(
+  user: PublicKey,
+  optionPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [ISOLATED_VAULT_SEED, user.toBuffer(), optionPda.toBuffer()],
+    programId,
+  );
+}
+
+/**
+ * Per-vault SPL escrow ATA. Authority = the IsolatedVault PDA itself.
+ * Seeds: [b"isolated_vault_ata", vault_pda]
+ */
+export function findIsolatedVaultEscrowPda(
+  vaultPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [ISOLATED_VAULT_ATA_SEED, vaultPda.toBuffer()],
+    programId,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1636 — DVOL variance index PDA
+//
+// Per-asset Deribit-style variance-swap fair-strike index. SKEW_AUTHORITY
+// pushes 28d / 90d annualised vol + realised-variance via `update_dvol`.
+// Consumed by frontend dashboards + variance-swap products (Phase 2).
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-asset DVOL PDA.
+ * Seeds: [b"dvol", &[asset_u8]]
+ *
+ * @param assetIdx — 0=BTC, 1=ETH, 2=SOL, 3=XRP, 4=HYPE.
+ */
+export function findDvolPda(assetIdx: number, programId = SKEW_PROGRAM_ID): [PublicKey, number] {
+  assertAssetIdx("findDvolPda", assetIdx);
+  return PublicKey.findProgramAddressSync([DVOL_SEED, Buffer.from([assetIdx])], programId);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1637 — Multi-leg combo intent PDAs
+//
+// Per-(buyer, combo_id) intent + premium escrow. Buyer commits upfront; the
+// relay coordinates leg fills via atomic_fill_relay with the combo PDA in
+// remaining_accounts; finalize/cancel returns residual + recovers rent.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-(buyer, combo_id) ComboIntentPda.
+ * Seeds: [b"combo_intent", buyer, combo_id_le_bytes_u64]
+ *
+ * @param buyer — buyer authority public key.
+ * @param comboId — caller-chosen u64 nonce so a single buyer can run
+ *   multiple concurrent combos.
+ */
+export function findComboIntentPda(
+  buyer: PublicKey,
+  comboId: bigint,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(comboId, 0);
+  return PublicKey.findProgramAddressSync([COMBO_INTENT_SEED, buyer.toBuffer(), buf], programId);
+}
+
+/**
+ * Per-combo SPL premium escrow ATA. Authority = the ComboIntentPda itself.
+ * Seeds: [b"combo_escrow", combo_intent_pda]
+ */
+export function findComboEscrowPda(
+  comboIntentPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [COMBO_ESCROW_SEED, comboIntentPda.toBuffer()],
+    programId,
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 1633.G — mainnet hardening PDAs
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * ConditionalOrderPda — per-(authority, order_id) stop-loss / take-profit /
+ * OCO leg. order_id is a caller-chosen u64 nonce; one authority can have
+ * many concurrent orders.
+ *
+ * Seeds: [b"cond_order", authority, order_id_le]
+ */
+export function findConditionalOrderPda(
+  authority: PublicKey,
+  orderId: bigint,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(orderId, 0);
+  return PublicKey.findProgramAddressSync(
+    [CONDITIONAL_ORDER_SEED, authority.toBuffer(), buf],
+    programId,
+  );
+}
+
+/**
+ * RfqAuctionPda — per-(buyer, auction_id) RFQ auction. Buyer escrows
+ * `max_premium_micro` USDC at register time; finalize/cancel refunds the
+ * auction escrow to the buyer. Premium settlement happens in the relay fill.
+ *
+ * Seeds: [b"rfq_auction", buyer, auction_id_le]
+ */
+export function findRfqAuctionPda(
+  buyer: PublicKey,
+  auctionId: bigint,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(auctionId, 0);
+  return PublicKey.findProgramAddressSync([RFQ_AUCTION_SEED, buyer.toBuffer(), buf], programId);
+}
+
+/**
+ * RfqMakerRegistryPda — per-MM anti-spam deposit account. MMs register
+ * once with `register_rfq_maker` and stake `RFQ_MAKER_DEPOSIT_LAMPORTS`;
+ * the registry gates `submit_rfq_quote` so an unregistered key cannot
+ * spam quotes.
+ *
+ * Seeds: [b"rfq_maker", mm_pubkey]
+ */
+export function findRfqMakerPda(mm: PublicKey, programId = SKEW_PROGRAM_ID): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([RFQ_MAKER_REGISTRY_SEED, mm.toBuffer()], programId);
+}
+
+/**
+ * Per-auction USDC escrow ATA. Authority is the `RfqAuctionPda` itself.
+ * Created by `register_rfq_auction`, drained by `finalize` or `cancel`.
+ *
+ * Seeds: [b"rfq_escrow", auction_pubkey]
+ */
+export function findRfqAuctionEscrowPda(
+  auctionPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [RFQ_AUCTION_ESCROW_SEED, auctionPda.toBuffer()],
+    programId,
+  );
+}
+
+/**
+ * Combo intent v2 PDA (32-leg variant). Replaces the v1 max-4-leg
+ * `findComboIntentPda` for callers using the wider leg array.
+ *
+ * Seeds: [b"combo_intent_v2", buyer, combo_id_le]
+ */
+export function findComboIntentV2Pda(
+  buyer: PublicKey,
+  comboId: bigint,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(comboId, 0);
+  return PublicKey.findProgramAddressSync([COMBO_INTENT_V2_SEED, buyer.toBuffer(), buf], programId);
+}
+
+/**
+ * Canonical RFQ-quote digest the MM client must sign before calling
+ * `submit_rfq_quote`. Mirrors on-chain `rfq_quote_digest()` in
+ * `skew-master/programs/skew-master/src/rfq_auction_ix.rs`.
+ *
+ *   SHA256( auction_pubkey ‖ premium_micro_LE ‖ valid_until_slot_LE ‖ mm_pubkey )
+ *
+ *   32 + 8 + 8 + 32 = 80 bytes input → 32 bytes output.
+ *
+ * The MM client builds this digest, signs it with their keypair, then
+ * includes an `Ed25519Program.createInstructionWithPublicKey` ix at
+ * `current_index - 1` in the same tx as `submit_rfq_quote`. The on-chain
+ * handler reads the Instructions sysvar and verifies the signature.
+ */
+export function rfqQuoteDigest(
+  auction: PublicKey,
+  premiumMicro: bigint,
+  validUntilSlot: bigint,
+  mm: PublicKey,
+): Buffer {
+  const payload = Buffer.alloc(80);
+  auction.toBuffer().copy(payload, 0);
+  payload.writeBigUInt64LE(premiumMicro, 32);
+  payload.writeBigUInt64LE(validUntilSlot, 40);
+  mm.toBuffer().copy(payload, 48);
+  // @noble/hashes is universal (browser + Node) — avoids the
+  // `node:crypto` import that breaks webpack client bundles.
+  return Buffer.from(sha256(payload));
 }

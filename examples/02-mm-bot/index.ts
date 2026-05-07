@@ -4,6 +4,7 @@
  * - Idempotent CM register on first run ($50K USDC collateral)
  * - WebSocket subscribe to skew-relay
  * - On quote_request: Black-Scholes price + 1.5× spread → quote_ack
+ * - On fill_consent: sign sha256(RelayPayload) → cm_sign
  *
  * Run: HELIUS_RPC=... KEYPAIR=~/cm.json RELAY_URL=... pnpm tsx index.ts
  *
@@ -14,9 +15,15 @@
 import * as fs from "node:fs";
 import { Connection, Keypair } from "@solana/web3.js";
 import { Wallet, AnchorProvider, Program } from "@coral-xyz/anchor";
-import { SkewClient, findClearingMemberPda } from "@skew/sdk";
-import idl from "@skew/sdk/idl/skew_master.json" assert { type: "json" };
+import {
+  SkewClient,
+  findClearingMemberPda,
+  findVolumeTrackerPda,
+  relayPayloadDigest,
+} from "@skew-labs/sdk";
+import idl from "@skew-labs/sdk/idl/skew_master.json" assert { type: "json" };
 import WebSocket from "ws";
+import nacl from "tweetnacl";
 
 // ---------- Black-Scholes (no deps) ----------
 function normCdf(x: number): number {
@@ -57,7 +64,25 @@ async function spotFor(asset: string): Promise<number> {
 const ASSET_DEFAULT_SIGMA: Record<string, number> = {
   BTC: 0.45, ETH: 0.65, SOL: 0.80, XRP: 0.75, HYPE: 0.85,
 };
-const SPREAD_MULT = 0.015; // master paper §30.2 OPT 1: 1.5% (1.015× fair value floor)
+const SPREAD_MULT = 0.015; // 1.5% spread above fair (1.015× floor enforced by the relay)
+const ASSET_CODES = ["BTC", "ETH", "SOL", "XRP", "HYPE"];
+
+function assetSymbol(raw: unknown): string {
+  if (typeof raw === "number" && Number.isInteger(raw)) return ASSET_CODES[raw] ?? String(raw);
+  return String(raw ?? "BTC").toUpperCase();
+}
+
+function priceFromWire(raw: unknown): number {
+  const n = Number(raw);
+  return n > 1_000_000 ? n / 1e8 : n;
+}
+
+function isCallish(msg: Record<string, unknown>): boolean {
+  const direction = Number(msg.direction ?? 1);
+  if (direction > 0) return true;
+  if (direction < 0) return false;
+  return String(msg.option_type ?? "").toLowerCase().includes("call");
+}
 
 async function main(): Promise<void> {
   const conn = new Connection(process.env.HELIUS_RPC!, "confirmed");
@@ -81,36 +106,69 @@ async function main(): Promise<void> {
     console.log(`existing CM PDA: ${cmPda.toBase58()}`);
   }
 
+  // atomic_fill_from_relay keeps VolumeTracker mut-only for CU/stack budget.
+  // A CM cannot be auto-initialized by the buyer-signed fill tx, so the bot
+  // performs this one-shot onboarding before quoting.
+  const [volumeTracker] = findVolumeTrackerPda(kp.publicKey);
+  if (!(await conn.getAccountInfo(volumeTracker))) {
+    console.log("initializing CM VolumeTrackerPda...");
+    const r = await skew.initVolumeTracker();
+    console.log(`  VolumeTracker: ${r.volumeTracker.toBase58()}`);
+  } else {
+    console.log(`existing VolumeTracker: ${volumeTracker.toBase58()}`);
+  }
+
   // Subscribe to relay
   const ws = new WebSocket(process.env.RELAY_URL ?? "wss://skew-relay-devnet.fly.dev/subscribe");
   ws.on("message", async (raw) => {
     const msg = JSON.parse(raw.toString());
     switch (msg.kind) {
       case "hello":
-        ws.send(JSON.stringify({ kind: "identify", role: "cm", authority: CM_AUTHORITY }));
+        ws.send(JSON.stringify({ kind: "identify", role: "cm", pubkey: CM_AUTHORITY }));
         return;
       case "identified":
         console.log("MM bot online — awaiting RFQs");
         return;
       case "quote_request": {
         try {
-          const isCall = msg.option_type?.toLowerCase().includes("call");
-          const spot = await spotFor(msg.asset);
-          const T = (msg.expiry_ts - Date.now() / 1000) / (365 * 86400);
-          const sigma = ASSET_DEFAULT_SIGMA[msg.asset] ?? 0.5;
-          const fair = bsPrice(spot, msg.strike, T, sigma, isCall);
+          const asset = assetSymbol(msg.asset);
+          const strike = priceFromWire(msg.strike);
+          const expiryTs = Number(msg.expiry_ts);
+          const isCall = isCallish(msg);
+          const spot = await spotFor(asset);
+          const T = (expiryTs - Date.now() / 1000) / (365 * 86400);
+          const sigma = ASSET_DEFAULT_SIGMA[asset] ?? 0.5;
+          const fair = bsPrice(spot, strike, T, sigma, isCall);
           const ask = fair * (1 + SPREAD_MULT);
+          const premiumMicro = BigInt(Math.max(0, Math.round(ask * 1_000_000)));
           ws.send(JSON.stringify({
             kind: "quote_ack",
-            request_id: msg.request_id,
-            cm_authority: CM_AUTHORITY,
-            premium: ask,
+            relay_nonce: msg.relay_nonce,
+            premium_micro: premiumMicro.toString(),
             ttl_seconds: 30,
           }));
-          console.log(`quoted ${msg.asset} ${msg.option_type} K=${msg.strike} for $${ask.toFixed(2)} (fair $${fair.toFixed(2)})`);
+          console.log(`quoted ${asset} ${msg.option_type ?? ""} K=${strike} for $${ask.toFixed(2)} (fair $${fair.toFixed(2)})`);
         } catch (e) {
           console.error("quote failed:", e instanceof Error ? e.message : String(e));
         }
+        return;
+      }
+      case "fill_consent": {
+        const relayNonce = String(msg.relay_nonce ?? "");
+        const payloadHex = String(msg.payload_hex ?? "");
+        if (!relayNonce || !payloadHex) {
+          console.error("fill_consent missing relay_nonce or payload_hex");
+          return;
+        }
+        const payloadBytes = Uint8Array.from(Buffer.from(payloadHex, "hex"));
+        const digest = relayPayloadDigest(payloadBytes);
+        const cmSig = nacl.sign.detached(digest, kp.secretKey);
+        ws.send(JSON.stringify({
+          kind: "cm_sign",
+          relay_nonce: relayNonce,
+          cm_sig_b64: Buffer.from(cmSig).toString("base64"),
+        }));
+        console.log(`signed fill_consent relay_nonce=${relayNonce}`);
         return;
       }
       case "error":

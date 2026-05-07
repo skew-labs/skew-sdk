@@ -1,4 +1,4 @@
-# @skew/sdk — examples
+# @skew-labs/sdk — examples
 
 Five end-to-end bot examples that run against devnet using nothing but the
 SDK + a funded keypair. Each is < 100 lines and demonstrates one capability.

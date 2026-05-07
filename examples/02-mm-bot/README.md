@@ -4,8 +4,9 @@
 >
 > Two-WebSocket roundtrip test (buyer + CM) confirmed:
 > 1. `buyer.send(quote_request)` → relay assigns `relay_nonce` + `quote_request_ack`
-> 2. CM (Bot 2) receives broadcast → BSM fair value via Round 16 Hermes spot ($77882) + 1.015× spread → `quote_ack premium=$1870.77`
-> 3. Buyer receives the quote, can accept
+> 2. CM (Bot 2) receives broadcast → BSM fair value via Round 16 Hermes spot ($77882) + 1.015× spread → `quote_ack premium_micro=1870770000`
+> 3. Buyer accepts → CM receives `fill_consent` → signs `sha256(RelayPayload)` → sends `cm_sign`
+> 4. Relay returns `buyer_tx_request`; buyer signs the Solana tx; relay submits
 >
 > **Caveat:** relay must run with `max_machines_running = 1` until Phase 2
 > Redis pub/sub ships (Round 22 finding — see `mainnet-promotion-checklist.md` §7b).
@@ -16,8 +17,10 @@
 A persistent Market Maker bot that:
 
 1. Self-onboards as a Clearing Member on first run (`registerClearingMember`)
-2. Subscribes to skew-relay WebSocket
-3. On every `quote_request`: fetches Pyth spot + computes Black-Scholes fair value + adds 1.5% spread + sends `quote_ack`
+2. Initializes its `VolumeTrackerPda` before quoting
+3. Subscribes to skew-relay WebSocket
+4. On every `quote_request`: fetches Pyth spot + computes Black-Scholes fair value + adds 1.5% spread + sends `quote_ack`
+5. On `fill_consent`: signs the same payload digest the buyer signed and returns `cm_sign`
 
 **Total code: ~110 lines, no MM-specific deps** (Black-Scholes inline ~20 lines).
 
@@ -25,8 +28,9 @@ A persistent Market Maker bot that:
 
 - `SkewClient.registerClearingMember(...)` — idempotent CM onboarding
 - `findClearingMemberPda(...)` — pre-flight `getAccountInfo` to skip duplicate register
-- WebSocket protocol — `hello → identify → quote_request → quote_ack` cycle
-- Master paper §30.2 OPT 1 — 1.5× spread floor (customer-retention bound)
+- WebSocket protocol — `hello → identify → quote_request → quote_ack → buyer_accept → fill_consent → cm_sign → buyer_tx_request → buyer_tx_signed`
+- `SkewClient.initVolumeTracker()` — required CM hot-path bootstrap for `atomic_fill_from_relay`
+- 1.5% spread above fair value — demo bot policy, not a relay guarantee
 - Pyth Hermes REST for live spot
 
 ## Run
@@ -45,6 +49,8 @@ First run:
 MM wallet: H2vDJ1V…
 registering as CM with $50K collateral...
   CM PDA: 8KqZ…
+initializing CM VolumeTrackerPda...
+  VolumeTracker: 3bF…
 MM bot online — awaiting RFQs
 ```
 
@@ -63,12 +69,13 @@ quoted BTC VanillaCall K=80000 for $1247.50 (fair $1229.06)
 
 | Tunable | Where | Default |
 |---|---|---|
-| Spread multiplier | `SPREAD_MULT` | `0.015` (1.5% — paper §30.2 floor) |
+| Spread multiplier | `SPREAD_MULT` | `0.015` (1.5% demo policy) |
 | σ per asset | `ASSET_DEFAULT_SIGMA` | BTC 0.45, ETH 0.65, SOL 0.80, … |
 | Initial collateral | `initialCollateralUsdc` | `50_000` |
 
-> Lowering spread below 1.5% increases fill rate but kills capital efficiency.
-> Master paper §30.2 grid sweep settled on 1.5× as the customer-retention bound.
+> Lowering spread below 1.5% increases fill rate but trades into thinner
+> capital efficiency. Production MMs should replace this demo policy with
+> their own inventory-aware quoting logic.
 
 ## Cross-references
 

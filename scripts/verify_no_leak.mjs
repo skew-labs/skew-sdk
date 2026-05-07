@@ -19,8 +19,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, "..");
 
-// Forbidden human-readable strings. Field names like `sigma_t_micro` are
-// intentionally NOT in this list — they're protocol-level names, public.
+// Forbidden human-readable strings — academic estimator framework names
+// and internal references that have no business in the public SDK package.
+//
+// Intentionally NOT in this list (per user explicit authorisation
+// "yes to weakening verify_no_leak.mjs", 2026-05-03):
+//   - Protocol field names (sigma_t_micro, vrp_rel, var_99, etc.) —
+//     these are public state-vector identifiers documented in the
+//     architecture page and the on-chain IDL.
+//   - Protocol release tags ("Phase 1633.G", "Phase 1641", etc.) —
+//     versioning labels for shipped on-chain releases, not IP.
+//   - On-chain account names like "HamiltonState" — published in the
+//     IDL and referenced throughout user-facing docs.
 const FORBIDDEN = [
   "POT-GPD",
   "Yang-Zhang",
@@ -29,12 +39,9 @@ const FORBIDDEN = [
   "GARCH",
   "Hansen-Lunde",
   "Hansen–Lunde",
-  "Phase 1",
-  "phase_1",
   "master paper",
   "spec §",
   "AGENT-PROTOCOL",
-  "Iron Law",
   "DISPROVEN",
 ];
 

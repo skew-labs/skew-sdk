@@ -1,5 +1,5 @@
 /**
- * 01-buy-vanilla-call — Create + buy a BTC vanilla call in 4 SDK calls.
+ * 01-buy-vanilla-call — Create/fund a BTC vanilla call in 2 SDK txs.
  *
  * Run: HELIUS_RPC=... KEYPAIR=~/skew-bot.json pnpm tsx index.ts
  *
@@ -12,8 +12,8 @@
 import * as fs from "node:fs";
 import { Connection, Keypair } from "@solana/web3.js";
 import { Wallet, AnchorProvider, Program } from "@coral-xyz/anchor";
-import { SkewClient } from "@skew/sdk";
-import idl from "@skew/sdk/idl/skew_master.json" assert { type: "json" };
+import { SkewClient } from "@skew-labs/sdk";
+import idl from "@skew-labs/sdk/idl/skew_master.json" assert { type: "json" };
 
 async function main(): Promise<void> {
   const conn = new Connection(process.env.HELIUS_RPC!, "confirmed");
@@ -41,10 +41,8 @@ async function main(): Promise<void> {
   console.log(`  create tx:  ${opt.createTx}`);
   console.log(`  deposit tx: ${opt.depositTx}`);
 
-  // 2. Buy from the same wallet (in production, a different wallet does this)
-  console.log(`buying for up to $50 premium...`);
-  const buy = await skew.buy(opt.address, 50);
-  console.log(`  buy tx:     ${buy.txSignature}`);
+  console.log(`\nW4 note: same-wallet buy is blocked on-chain (creator == buyer).`);
+  console.log(`Use a separate buyer wallet or the RFQ/relay path to activate this option.`);
 
   console.log(`\n✓ done. View on Solana Explorer:`);
   console.log(`  https://explorer.solana.com/address/${opt.address.toBase58()}?cluster=devnet`);

@@ -1,23 +1,60 @@
 import type { PublicKey } from "@solana/web3.js";
 
 /**
- * launch list launch panel ().
+ * Launch panel symbol.
  * Mirrors anchor `state::asset::Asset` enum (BTC=0, ETH=1, SOL=2, XRP=3, HYPE=4).
  * Other symbols are rejected at the anchor instruction layer.
  */
 export type Underlying = "BTC" | "ETH" | "SOL" | "XRP" | "HYPE";
 
 /**
- * Anchor IDL has only 3 OptionType variants (Digital / CappedVanilla / RangeAccrual)
- * after the Decision-32 OneTouch DROP. The SDK exposes seven user-friendly payoff
- * names that map onto (option_type, direction, extra_param) triples. See
- * `mapPayoffToAnchor` in `pda.ts` for the mapping table.
+ * Anchor IDL `OptionType` variants. The on-chain storage uses these six;
+ * the user-facing `PayoffType` is mapped onto a triple
+ * (option_type + direction + extra_param) by `mapPayoffToAnchor` in `pda.ts`.
+ *
+ * Phase 2 (2026-05-04): Inverse family appended (`VanillaInverse`,
+ * `DigitalInverse`) — premium + collateral + payoff in BASE asset
+ * (e.g. SOL/jitoSOL settlement_mint). Spec: V2_SOL_NATIVE_OPTIONS_PLAN
+ * 2026-05-04 §7.
+ */
+export type OptionType =
+  | "Vanilla"
+  | "Digital"
+  | "CappedVanilla"
+  | "RangeAccrual"
+  | "VanillaInverse"
+  | "DigitalInverse";
+
+/**
+ * Anchor IDL `OptionState` variants. Lifecycle ordering for a written option:
+ * `Created` → `Funded` (collateral deposited) → `Active` (premium paid by buyer)
+ *           → `Expired` → `Settled` (payoff released) | `ExpiredAbandoned`.
+ * `Disputed` is reachable from `Expired` when the Pyth confidence band is wide.
+ */
+export type OptionState =
+  | "Created"
+  | "Funded"
+  | "Active"
+  | "Expired"
+  | "Settled"
+  | "Disputed"
+  | "ExpiredAbandoned";
+
+/**
+ * Anchor IDL has 6 OptionType variants after Phase 2 (2026-05-04):
+ * Vanilla / Digital / CappedVanilla / RangeAccrual / VanillaInverse / DigitalInverse.
+ * The SDK exposes 11 user-friendly payoff names that map onto
+ * (option_type, direction, extra_param) triples. See `mapPayoffToAnchor`
+ * in `pda.ts` for the mapping table.
  *
  * @example
- *   "digital_call"   → option_type=Digital,        direction=+1
- *   "vanilla_put"    → option_type=CappedVanilla,  direction=-1, extra_param=0 (uncapped floor)
- *   "capped_call"    → option_type=CappedVanilla,  direction=+1, extra_param=K_cap
- *   "range_accrual"  → option_type=RangeAccrual,   direction=+1, extra_param=upper_bound
+ *   "vanilla_call"          → option_type=Vanilla,         direction=+1
+ *   "vanilla_put"           → option_type=Vanilla,         direction=-1
+ *   "digital_call"          → option_type=Digital,         direction=+1
+ *   "capped_call"           → option_type=CappedVanilla,   direction=+1, extra_param=K_cap
+ *   "range_accrual"         → option_type=RangeAccrual,    direction=0,  extra_param=upper_bound
+ *   "vanilla_inverse_call"  → option_type=VanillaInverse,  direction=+1
+ *   "digital_inverse_put"   → option_type=DigitalInverse,  direction=-1
  */
 export type PayoffType =
   | "digital_call"
@@ -26,7 +63,11 @@ export type PayoffType =
   | "vanilla_put"
   | "capped_call"
   | "capped_put"
-  | "range_accrual";
+  | "range_accrual"
+  | "vanilla_inverse_call"
+  | "vanilla_inverse_put"
+  | "digital_inverse_call"
+  | "digital_inverse_put";
 
 /**
  * Buy / sell direction. Encoded on-chain as i8 (+1 for buy, -1 for sell).
@@ -90,6 +131,20 @@ export interface CreateParams {
    * SDK 0.1.0 backwards compatibility — prefer `extraParam` in new code.
    */
   upperBound?: number;
+  /**
+   * Phase 2 (2026-05-04) — settlement currency.
+   *
+   * Defaults to USDC (`SkewClient.usdcMint`). Pass a SOL-family mint
+   * (jitoSOL `J1toso1uCk3R...` or wSOL `So111...112`) for inverse +
+   * same-asset collateral options. The mint flows to:
+   *   - `option.settlement_mint` (premium + payoff currency)
+   *   - the escrow ATA (per-option collateral lock)
+   *   - the writer's collateral ATA (deposit_collateral source)
+   *
+   * Inverse options should be created with a base-asset mint matching the
+   * option underlying for the structurally right-way invariant W-WW5 to hold.
+   */
+  settlementMint?: PublicKey;
 }
 
 export interface CreateResult {
@@ -138,13 +193,100 @@ export interface RegisterCmResult {
   cmPda: PublicKey;
   /** Per-CM SPL token escrow PDA (USDC custody). */
   cmEscrow: PublicKey;
-  /** register_clearing_member transaction signature. */
+  /** Per-CM PositionRegistry PDA initialized in the same onboarding tx. */
+  positionRegistry: PublicKey;
+  /** register_clearing_member + init_position_registry transaction signature. */
   txSignature: string;
 }
 
 /** Result of any single-tx mutation (transfer, cancel, close, collateral). */
 export interface TxResult {
   txSignature: string;
+}
+
+/**
+ * Filter / sort options for `SkewClient.listOptions()`.
+ *
+ * Filters are applied client-side after `program.account.optionAccount.all()`
+ * returns the discriminator-filtered set. Anchor 0.31's `.all()` adds the
+ * 8-byte `OptionAccount` discriminator memcmp automatically, so unrelated
+ * PDAs (RFQ / CM / PoVS / governance) are never returned.
+ */
+export interface ListOptionsOpts {
+  /** Filter by launch-panel underlying. */
+  underlying?: Underlying;
+  /** Filter by anchor `OptionType` storage variant. */
+  optionType?: OptionType;
+  /** Filter by anchor `OptionState`. Default: no filter (all states). */
+  state?: OptionState;
+  /** Max items returned. Default 100. Hard cap 500 to keep JSON payloads bounded. */
+  limit?: number;
+  /**
+   * Sort order. `createdAt` (default) returns newest first — matches the
+   * UI marketplace tile order. `expiry` returns latest-expiry first —
+   * useful for ladder views.
+   */
+  sortBy?: "createdAt" | "expiry";
+}
+
+/**
+ * Decoded summary of one `OptionAccount` PDA. All scaled fields appear
+ * twice — once at on-chain precision (bigint) and once converted to USD
+ * (number) for display. Conversion factors:
+ *   - strike, upperBound: × 10^8 (Pyth expo)
+ *   - payoffAmount, collateralLocked, v0UsdcMicro: × 10^6 (USDC decimals)
+ */
+export interface OptionSummary {
+  /** Option PDA address (base58). */
+  pda: string;
+  /** Writer (CM authority) that sized + collateralised the option. */
+  creator: string;
+  /** Current holder of the option token. Equals `creator` until first buy. */
+  holder: string;
+  /** Anchor `OptionType` enum decoded to its variant name. */
+  optionType: OptionType;
+  /** Anchor `OptionState` enum decoded to its variant name. */
+  state: OptionState;
+  /** Launch-panel symbol decoded from on-chain `asset: u8`. */
+  underlying: Underlying;
+  /** Raw on-chain `asset: u8` index (BTC=0, ETH=1, SOL=2, XRP=3, HYPE=4). */
+  underlyingIndex: number;
+  /** Direction encoded by writer at creation: `"buy"` (i8=+1) or `"sell"` (i8=-1). */
+  direction: Direction;
+  /** Strike in USD (after dividing the on-chain `u64` by 10^8). */
+  strikeUsd: number;
+  /** Strike at on-chain Pyth-scaled precision (USD × 10^8). */
+  strikeOnChain: bigint;
+  /** Range-Accrual upper bound in USD (0 if option is not RangeAccrual). */
+  upperBoundUsd: number;
+  /** Upper bound at on-chain precision (USD × 10^8). */
+  upperBoundOnChain: bigint;
+  /** Expiry as unix seconds. */
+  expiryTs: number;
+  /** Max payoff (notional) in USD. */
+  payoffUsd: number;
+  /** Max payoff at on-chain precision (USDC × 10^6). */
+  payoffAmount: bigint;
+  /** Locked collateral in USD. */
+  collateralLockedUsd: number;
+  /** Locked collateral at on-chain precision (USDC × 10^6). */
+  collateralLocked: bigint;
+  /** V0 stamp (Boundary-Aware IM) in USD. */
+  v0Usd: number;
+  /** V0 stamp at on-chain precision (USDC × 10^6). */
+  v0UsdcMicro: bigint;
+  /** σ stamp at creation (annualised, e.g. 0.45 = 45%). */
+  sigmaAtCreation: number;
+  /** Spot at creation in USD. */
+  spotAtCreationUsd: number;
+  /** Whether the option has been settled (`true` after payoff release). */
+  settled: boolean;
+  /** Creation timestamp as unix seconds. */
+  createdAt: number;
+  /** Pyth feed pubkey (base58) used for settlement. */
+  underlyingFeedId: string;
+  /** Settlement SPL mint (base58) — typically devnet USDC. */
+  settlementMint: string;
 }
 
 /**
@@ -160,8 +302,491 @@ export interface MarginCalcResult {
   txSignature: string;
   /** CM's posted collateral, in USDC × 10^6 (read after tx). */
   collateralUsdcMicro: bigint;
-  /** Total IM locked across positions, USDC × 10^6. */
+  /** Fresh PM requirement snapshot (`cm.last_im_micro`), USDC × 10^6. */
   imLockedUsdcMicro: bigint;
-  /** Free collateral = collateral - im_locked, USDC × 10^6. */
+  /** Withdrawable free collateral = collateral - tier_lockup - total_pm_locked, USDC × 10^6. */
   freeCollateralUsdcMicro: bigint;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1635 — Isolated Margin per-position vault types
+// ---------------------------------------------------------------------------
+
+/**
+ * Decoded snapshot of an `IsolatedVault` PDA. Per (user, option). All
+ * USDC-denominated fields are in micro-units (× 10⁶).
+ */
+export interface IsolatedVaultSnapshot {
+  /** Total USDC held in the vault escrow. */
+  usdcMicro: bigint;
+  /** USDC pledged against the bound option's open exposure. */
+  lockedMicro: bigint;
+  /** Withdrawable balance = `usdcMicro − lockedMicro`. */
+  freeMicro: bigint;
+  /** Realised PnL accumulator across the bound option's lifetime.
+   *  Negative = vault absorbed loss; positive = vault profited. */
+  realizedPnlMicro: bigint;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1636 — DVOL variance index types
+// ---------------------------------------------------------------------------
+
+/**
+ * Decoded snapshot of a `DvolPda`. Annualised variance-swap fair-strike
+ * volatility per asset, mirrors Deribit's DVOL methodology.
+ */
+export interface DvolSnapshot {
+  /** 28-day annualised fair-strike vol in percent (e.g. 65.5). */
+  dvol28dPct: number;
+  /** 90-day annualised fair-strike vol in percent. */
+  dvol90dPct: number;
+  /** Cumulative realised variance accumulator (28d window) in percent. */
+  realizedVar28dPct: number;
+  /** Solana slot of the most recent crank push. */
+  lastUpdateSlot: bigint;
+  /** True when current slot − last_update < `DVOL_STALENESS_SLOTS` (9_000 ≈ 1 h). */
+  isFresh: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1637 — Multi-leg combo intent types
+// ---------------------------------------------------------------------------
+
+/**
+ * Single leg specification in a multi-leg combo. The `option` PDA must be
+ * deterministic — for relay-issued legs, predict via
+ * `findOptionPda(cm_authority, relay_nonce)` BEFORE registering the combo.
+ */
+export interface ComboLeg {
+  /** Target OptionAccount PDA. Set when buyer pre-knows the leg's PDA. */
+  option: PublicKey;
+  /** Buyer's intended side: `+1` = long (pay premium), `-1` = short (receive). */
+  side: 1 | -1;
+  /** Per-leg max premium in USD (e.g. 250 for a $250 ceiling). */
+  maxPremiumUsdc: number;
+}
+
+/**
+ * On-chain combo lifecycle status. Mirrors anchor `ComboStatus` enum.
+ */
+export type ComboStatus = "Open" | "Active" | "Cancelled" | "Settled";
+
+/**
+ * Decoded snapshot of a `ComboIntentPda`. Per (buyer, comboId).
+ */
+export interface ComboIntentSnapshot {
+  /** Number of active legs (2..=4). */
+  nLegs: number;
+  /**
+   * Bitmask of legs that have been filled via `atomic_fill_relay`. Bit i
+   * set ⇔ leg index i has been atomically settled in the relay path.
+   * `legsFilledMask & ((1<<nLegs)−1) === ((1<<nLegs)−1)` ⇔ fully filled.
+   */
+  legsFilledMask: number;
+  /** Combo lifecycle status. */
+  status: ComboStatus;
+  /** Total upfront escrow cap (USDC × 10⁶). */
+  totalMaxPremiumMicro: bigint;
+  /** Cumulative premium drained to leg fills so far (USDC × 10⁶). */
+  totalPremiumPaidMicro: bigint;
+  /** Combo expiry — cancel/finalize only permitted before this ts. */
+  expiryTs: bigint;
+  /** Convenience derived from the full bitmask check. */
+  isFullyFilled: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1634 — ADL / Clawback admin params
+//
+// Both instructions take a target USDC drain amount + a list of
+// (winnerCmPda, winnerCmEscrowAta) pairs in remaining_accounts. Caller
+// MUST be `SKEW_AUTHORITY` (Phase 1 governance gate; Phase 2 swaps to
+// 3-of-5 multisig).
+// ---------------------------------------------------------------------------
+
+/**
+ * Single (winner_cm, winner_cm_escrow_ata) pair the keeper supplies for
+ * ADL or Clawback. Off-chain priority sort decides the order; on-chain
+ * enforces only per-CM caps + dedup.
+ */
+export interface RecoveryWinnerCm {
+  /** Winner CM PDA — `findClearingMemberPda(authority)`. */
+  cm: PublicKey;
+  /** Per-CM SPL escrow ATA — `findCmEscrowPda(cm)`. */
+  cmEscrow: PublicKey;
+}
+
+/**
+ * Result of one `adl_step` or `clawback_step` invocation. The instruction
+ * returns `u64` total drained — exposed here as `bigint`.
+ */
+export interface RecoveryStepResult extends TxResult {
+  /** Total USDC drained from the supplied winner list (× 10⁶). */
+  totalDrainedMicro: bigint;
+}
+
+// ── Phase 1633.G — conditional / RFQ / combo v2 ───────────────────────────
+
+/**
+ * `register_conditional_order::kind` — order template.
+ * Const-shaped object (not enum) so the SDK doesn't pull in tsc enum runtime.
+ */
+export const ConditionalKind = {
+  StopLoss: 0,
+  TakeProfit: 1,
+} as const;
+export type ConditionalKindCode = (typeof ConditionalKind)[keyof typeof ConditionalKind];
+
+/** `register_conditional_order::trigger_mode` — Spot vs Pyth EMA. */
+export const ConditionalTriggerMode = {
+  Spot: 0,
+  Ema: 1,
+} as const;
+export type ConditionalTriggerModeCode =
+  (typeof ConditionalTriggerMode)[keyof typeof ConditionalTriggerMode];
+
+/** `register_conditional_order::trigger_direction` — which side of the trigger. */
+export const ConditionalTriggerDirection = {
+  Above: 0,
+  Below: 1,
+} as const;
+export type ConditionalTriggerDirectionCode =
+  (typeof ConditionalTriggerDirection)[keyof typeof ConditionalTriggerDirection];
+
+/**
+ * `register_conditional_order::action` — what `apply_*_action` call to
+ * dispatch when the trigger condition has held for `triggerGraceSlots`.
+ */
+export const ConditionalAction = {
+  EarlyExercise: 0,
+  CloseIsolated: 1,
+  SellViaRfq: 2,
+  BuybackViaRfq: 3,
+} as const;
+export type ConditionalActionCode = (typeof ConditionalAction)[keyof typeof ConditionalAction];
+
+/**
+ * Read-state snapshot of a `ConditionalOrderPda`. Account schema not yet
+ * hand-patched into the v54 IDL — read with `connection.getAccountInfo` +
+ * Borsh decode until it lands. SDK methods accept values as explicit args
+ * (e.g. `applyCloseIsolatedAction(orderId, actionTarget)`) meanwhile.
+ */
+export interface ConditionalOrderSnapshot {
+  pda: PublicKey;
+  authority: PublicKey;
+  orderId: bigint;
+  kind: ConditionalKindCode;
+  triggerMode: ConditionalTriggerModeCode;
+  triggerDirection: ConditionalTriggerDirectionCode;
+  triggerPrice1e8: bigint;
+  triggerOracle: PublicKey;
+  triggerGraceSlots: number;
+  state: "Active" | "GracePending" | "Triggered" | "Cancelled" | "Expired";
+  action: ConditionalActionCode;
+  actionTarget: PublicKey;
+  actionMinPremiumMicro: bigint;
+  actionMaxPremiumMicro: bigint;
+  actionMaxSlippageBps: number;
+  validUntilTs: bigint;
+  registeredAt: bigint;
+}
+
+/** Read-state snapshot of an `RfqAuctionPda`. Same IDL caveat as above. */
+export interface RfqAuctionSnapshot {
+  pda: PublicKey;
+  buyer: PublicKey;
+  auctionId: bigint;
+  optionSpec: {
+    asset: number;
+    strike: bigint;
+    expiryTs: bigint;
+    payoffAmountMicro: bigint;
+    optionType: number;
+    direction: number;
+    upperBound: bigint;
+  };
+  maxPremiumMicro: bigint;
+  auctionOpenSlot: bigint;
+  auctionCloseSlot: bigint;
+  state: "Open" | "Settled" | "Cancelled";
+  bestQuotePremiumMicro: bigint | null;
+  bestQuoteMm: PublicKey | null;
+  bestQuoteValidUntilSlot: bigint | null;
+  registeredAt: bigint;
+}
+
+/** Read-state snapshot of an `RfqMakerRegistry` PDA. */
+export interface RfqMakerSnapshot {
+  pda: PublicKey;
+  mm: PublicKey;
+  depositMicro: bigint;
+  registeredAt: bigint;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1639 — Read snapshot types for raw on-chain reads (no instruction).
+//
+// These mirror the byte layout of the corresponding state PDAs. The SDK
+// exposes them via fetch* helpers that issue a raw `getAccountInfo` and
+// decode by offset (same pattern skew-mcp / skew-pricing PoVS reader use).
+// All decimal fields are returned as `number` (f64) for ergonomics — the
+// underlying micro-units (× 10⁶) are preserved as `bigint` where useful.
+// ---------------------------------------------------------------------------
+
+/**
+ * Decoded snapshot of a `PoVSState` PDA. The full path-of-volatility-surface
+ * state vector — fast-window σ + long-window σ + Heston-style integrated
+ * variance + variance-risk-premium + tail-index pair + regime indicator.
+ */
+export interface PoVSStateSnapshot {
+  /** Fast-window σ_t (instantaneous σ proxy), annualised decimal (e.g. 0.51). */
+  sigmaT: number;
+  /** Long-window σ_∞ (long-run σ proxy), annualised decimal. */
+  sigmaInf: number;
+  /** Closed-form θ_d at T=28 d (annualised total variance × T_frac). */
+  thetaDt28: number;
+  /** Variance-risk-premium 1-step forecast (signed decimal, clipped to [-0.20, +0.30]). */
+  vrpRel: number;
+  /** PoVS forecast IV @ ATM 28d (decimal). 0 ⇒ cold-start, treat as null. */
+  ivAtm28d: number;
+  /** 2-state regime indicator r_t ∈ [0, 1]. 0 = calm, 1 = stress. */
+  regimeRt: number;
+  /** Tail index ξ. ξ > 0.20 triggers the on-chain TailAddOn. */
+  xi: number;
+  /** Tail scale β. */
+  beta: number;
+  /** VaR_99 (decimal — fraction of notional). */
+  var99: number;
+  /** ES_99.9 (decimal — Expected Shortfall in 0.1% tail). */
+  es999: number;
+  /** Solana slot of most recent `update_povs_state` crank. */
+  lastUpdateSlot: bigint;
+}
+
+/** Decoded snapshot of a `HamiltonState` PDA — 2-state regime filter. */
+export interface HamiltonSnapshot {
+  asset: number;
+  /** Posterior P(calm | observation) ∈ [0, 1]. */
+  piCalm: number;
+  /** Posterior P(stress | observation) ∈ [0, 1]. piCalm + piStress ≤ 1. */
+  piStress: number;
+  /** Calm-regime drift × 1e6 (signed decimal). */
+  muCalm: number;
+  /** Stress-regime drift × 1e6 (signed decimal). */
+  muStress: number;
+  /** Calm-regime σ (decimal). */
+  sigmaCalm: number;
+  /** Stress-regime σ (decimal). */
+  sigmaStress: number;
+  /** Markov P(stress | prev_calm). */
+  p01: number;
+  /** Markov P(calm | prev_stress). */
+  p10: number;
+  consecutiveStressDays: number;
+  consecutiveCalmDays: number;
+  lastUpdateSlot: bigint;
+}
+
+/** Decoded snapshot of a `SkewMetricsPda`. RR/BF/term structure. */
+export interface SkewMetricsSnapshot {
+  asset: number;
+  /** ATM IV @ 28d (decimal). */
+  atmIv28d: number;
+  /** 25-delta risk reversal — signed decimal. Negative = put-skew (typical). */
+  rr25: number;
+  /** 25-delta butterfly — convexity proxy. */
+  bf25: number;
+  /** 10-delta risk reversal (deeper-OTM put-skew measure). */
+  rr10: number;
+  /** ATM term-structure slope (decimal). */
+  atmSlope: number;
+  /** ATM IV per tenor (decimal). 8 entries: 7d / 14d / 21d / 28d / 60d / 90d / 180d / 365d. */
+  ivPerTenor: number[];
+  lastUpdateSlot: bigint;
+}
+
+/** Decoded snapshot of the singleton `InsuranceFund` PDA used by the 6-tier default cascade. */
+export interface InsuranceFundSnapshot {
+  /** Tier-3 Protocol Skin-In-The-Game balance (USDC micro). */
+  tier3ProtocolSitgMicro: bigint;
+  /** Tier-4 mutualized — BTC/ETH/SOL pool. */
+  tier1MutualizedPoolMicro: bigint;
+  /** Tier-4 mutualized — XRP/HYPE pool. */
+  tier2MutualizedPoolMicro: bigint;
+  /** Tier-4 mutualized — cross-asset spillover reserve. */
+  crossMutualizedPoolMicro: bigint;
+  /** Cumulative CM Tier-2 contributions tally. */
+  totalCmContributionsMicro: bigint;
+  /** Lifetime sum of tiers 3+4 drained on default events. */
+  totalDrainedMicro: bigint;
+  /** Count of `DefaultAbsorbed` events. */
+  defaultEventCount: number;
+}
+
+/** Decoded snapshot of a per-CM `ClearingMemberAccount` PDA. */
+export interface ClearingMemberSnapshot {
+  authority: PublicKey;
+  /** Total USDC posted to CM escrow. */
+  collateralMicro: bigint;
+  /** Earmarked for IF Tier-2 CM contribution. */
+  ifContributionMicro: bigint;
+  /** Tier-locked USDC (subtracted from free_collateral). */
+  tierLockupCollateralMicro: bigint;
+  /** Sum of `option.collateral_locked` across CM's open writer positions. */
+  totalPmLockedMicro: bigint;
+  /** `free_collateral()` = collateral − tier_lockup − total_pm_locked. */
+  freeCollateralMicro: bigint;
+  /** Net long notional across all positions (USDC micro). */
+  netNotionalLongMicro: bigint;
+  netNotionalShortMicro: bigint;
+  positionsCount: number;
+  /** Most recent calculate_margin / atomic_fill snapshot of portfolio IM. */
+  lastImMicro: bigint;
+  /** Active Verified tier (0=Standard, 1=Silver, 2=Gold, 3=Platinum). */
+  tier: 0 | 1 | 2 | 3;
+  /** Earliest unix ts at which a downgrade is permitted. */
+  tierLockedUntil: bigint;
+  /** Set when `liquidate.rs` flagged the CM insolvent. */
+  underLiquidation: boolean;
+  /** Last `calculate_margin` write timestamp. */
+  lastMarginCheck: bigint;
+}
+
+/**
+ * Decoded snapshot of a per-(user, mint) `LstVault` PDA. Fields parsed from
+ * raw account bytes — the IDL doesn't publish this account.
+ */
+export interface LstVaultSnapshot {
+  user: PublicKey;
+  lstMint: PublicKey;
+  /** Total LST quantity held in the vault SPL token account (lamports). */
+  lstQty: bigint;
+  /** LST quantity pledged against open option fills (lamports). */
+  lockedQty: bigint;
+  /** LST quantity pledged as Verified-tier lockup floor (lamports). */
+  tierLockedQty: bigint;
+  /** Solana slot of the most recent stake-pool ER refresh. */
+  lastErUpdateSlot: bigint;
+  /** Free quantity = lstQty − lockedQty − tierLockedQty (in lamports). */
+  freeQty: bigint;
+}
+
+/**
+ * Decoded snapshot of a per-user `NativeSolVault` PDA (Phase 1A.2 2026-05-04).
+ * No mint dimension (single wSOL mint per protocol). No tier_locked slot —
+ * Verified-tier lockup is jitoSOL-only by design (yield-bearing collateral
+ * is the value proposition for the tier lockup).
+ *
+ * Layout: 65 B (8 disc + 32 user + 8 sol_qty + 8 locked_qty + 8 last_update_slot + 1 bump).
+ */
+export interface NativeSolVaultSnapshot {
+  user: PublicKey;
+  /** Total wSOL held in the vault escrow ATA (lamports). */
+  solQty: bigint;
+  /** wSOL pledged against open option fills (lamports). */
+  lockedQty: bigint;
+  /** Solana slot of the most recent vault-touching ix. */
+  lastUpdateSlot: bigint;
+  /** Free quantity = solQty − lockedQty (in lamports). */
+  freeQty: bigint;
+}
+
+/**
+ * Decoded snapshot of a `SeriesListingPda` (σ·√T grid metadata cell).
+ */
+export interface SeriesListingSnapshot {
+  asset: number;
+  optionType: number; // 0=Vanilla, 1=Digital, 2=CappedVanilla, 3=RangeAccrual, 4=VanillaInverse, 5=DigitalInverse
+  direction: number; // -1=Put, 0=RangeAccrual, +1=Call
+  status: number; // 0=Active, 1=Expiring, 2=Delisted
+  strike: bigint; // Pyth scale (1e8)
+  expiryTs: bigint; // unix seconds
+  lastFillPriceMicro: bigint;
+  lastFillAt: bigint;
+  totalOiCount: number;
+  cumulativeFillCount: number;
+  maxOiCount: number; // 0 = no cap
+  listedAt: bigint;
+}
+
+/**
+ * Decoded snapshot of the singleton `CrossAssetMatrix` — 10 pairwise
+ * correlations across BTC/ETH/SOL/XRP/HYPE in two regimes (calm and
+ * stress). Pair ordering: (BTC,ETH), (BTC,SOL), (BTC,XRP), (BTC,HYPE),
+ * (ETH,SOL), (ETH,XRP), (ETH,HYPE), (SOL,XRP), (SOL,HYPE), (XRP,HYPE).
+ */
+export interface CrossAssetSnapshot {
+  /** 10-entry P5 rolling 180d ρ (decimal — 0..1). */
+  iccRhoP5: number[];
+  /** 10-entry stress regime ρ (decimal — 0..1). */
+  stressRho: number[];
+  /** Slot of the most recent successful update (any kind). */
+  lastFitSlot: bigint;
+  /** Slot of the last weekly Pearson refresh. */
+  lastPearsonSlot: bigint;
+  /** Slot of the last daily stress-ρ refresh. */
+  lastStressSlot: bigint;
+}
+
+/**
+ * Decoded snapshot of `MicrostructurePDA` for a single asset.
+ */
+export interface MicrostructureSnapshot {
+  asset: number;
+  lastUpdateSlot: bigint;
+  /** Last-trade spot (USD). */
+  spot: number;
+  /** Best bid/ask spread (bps of mid). */
+  bidAskSpreadBps: number;
+  /** Depth $ within ±$100k of mid (USD). */
+  depth100kUsd: number;
+  /** 24-hour rolling notional (USD). */
+  volume24hUsd: number;
+  /** ATM 28d IV — bid side (decimal). */
+  ivBid28d: number;
+  /** ATM 28d IV — ask side (decimal). */
+  ivAsk28d: number;
+}
+
+/**
+ * Decoded snapshot of a `BuilderCodePda` (fee-rebate registry).
+ */
+export interface BuilderCodeSnapshot {
+  builder: PublicKey;
+  registeredAt: bigint;
+  /** $1K USDC anti-spam deposit (USDC micro). */
+  depositLockedMicro: bigint;
+  /** Decayed 30-day routed premium (USDC micro). */
+  volume30dRoutedMicro: bigint;
+  /** Last decay-update timestamp (unix seconds). */
+  lastVolumeUpdateTs: bigint;
+  /** Builder share of accrued taker fees (USDC micro). */
+  feesAccruedMicro: bigint;
+  /** UTF-8 label, trailing zero bytes trimmed. */
+  label: string;
+}
+
+/**
+ * Decoded snapshot of a `ComboIntentPdaV2` (≤32-leg combo intent).
+ * Only the first `legCount` legs are decoded — unused slots are skipped.
+ */
+export interface ComboIntentV2Snapshot {
+  buyer: PublicKey;
+  comboId: bigint;
+  /** 0=Open, 1=Active, 2=Cancelled, 3=Settled, 4=Expired. */
+  status: number;
+  legCount: number;
+  legsFilled: number;
+  totalMaxPremiumMicro: bigint;
+  totalRealisedPremiumMicro: bigint;
+  expiresTs: bigint;
+  createdAt: bigint;
+  legs: Array<{
+    option: PublicKey;
+    side: number;
+    filled: boolean;
+    maxPremiumMicro: bigint;
+    fillPremiumMicro: bigint;
+  }>;
 }

@@ -23,8 +23,8 @@
 
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { Wallet, AnchorProvider, Program } from "@coral-xyz/anchor";
-import { SkewClient } from "@skew/sdk";
-import idl from "@skew/sdk/idl/skew_master.json" assert { type: "json" };
+import { SkewClient } from "@skew-labs/sdk";
+import idl from "@skew-labs/sdk/idl/skew_master.json" assert { type: "json" };
 import * as fs from "node:fs";
 
 const TICK_MS = 60_000;

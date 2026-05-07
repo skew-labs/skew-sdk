@@ -1,14 +1,15 @@
 {
   "name": "@skew-labs/sdk",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "TypeScript SDK for Skew — Solana options infrastructure. Create, buy, settle options in five lines.",
   "license": "MIT",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "homepage": "https://github.com/skew-labs/skew-sdk",
+  "homepage": "https://github.com/skew-labs/skew/tree/main/skew/skew-sdk",
   "repository": {
     "type": "git",
-    "url": "https://github.com/skew-labs/skew-sdk.git"
+    "url": "git+https://github.com/skew-labs/skew.git",
+    "directory": "skew/skew-sdk"
   },
   "bugs": {
     "url": "https://github.com/skew-labs/skew/issues"
@@ -48,6 +49,9 @@
     "@coral-xyz/anchor": "^0.31.1",
     "@solana/spl-token": "^0.4.0",
     "@solana/web3.js": "^1.95.0"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.4.0"
   },
   "devDependencies": {
     "@coral-xyz/anchor": "^0.31.1",

@@ -1,5 +1,48 @@
 export { SkewClient } from "./client";
 export type { SkewClientOptions } from "./client";
+export {
+  routeToBestQuote,
+} from "./router";
+export type {
+  RouterCandidate,
+  RouteOptions,
+  RouteHit,
+  RouteFailure,
+  RouteResult,
+} from "./router";
+export {
+  INSTANT_RFQ_DEFAULT_RELAY_URL,
+  RELAY_PAYLOAD_LEN,
+  buildRelayPayload,
+  collectInstantRfqQuotes,
+  encodeRelayPayload,
+  hitInstantRfqQuote,
+  relayPayloadDigest,
+  relayPayloadToJson,
+  validateInstantRfqLane,
+} from "./instant-rfq";
+export type {
+  InstantRfqHitResult,
+  InstantRfqOptionSpec,
+  InstantRfqQuote,
+  RelayPayload,
+} from "./instant-rfq";
+export {
+  SKEW_ANCHOR_OPTION_TYPES,
+  SKEW_ASSET_PAYOFFS,
+  SKEW_CAPABILITIES_VERSION,
+  SKEW_COLLATERAL_RAILS,
+  SKEW_PAYOFF_TYPES,
+  SKEW_TRADE_LANES,
+  SKEW_UNDERLYINGS,
+  getSkewCapabilities,
+} from "./capabilities";
+export type {
+  SkewCollateralRail,
+  SkewCollateralSymbol,
+  SkewTradeLaneCapability,
+  SkewTradeLaneId,
+} from "./capabilities";
 export type {
   CreateParams,
   CreateResult,
@@ -13,28 +56,78 @@ export type {
   Underlying,
   PayoffType,
   Direction,
+  OptionType,
+  OptionState,
+  ListOptionsOpts,
+  OptionSummary,
+  // Phase 1635-1637 — off-chain harness types
+  IsolatedVaultSnapshot,
+  DvolSnapshot,
+  ComboLeg,
+  ComboStatus,
+  ComboIntentSnapshot,
+  RecoveryWinnerCm,
+  RecoveryStepResult,
+  // Phase 1633.G — conditional + RFQ + combo v2 type codes / snapshots
+  ConditionalKindCode,
+  ConditionalTriggerModeCode,
+  ConditionalTriggerDirectionCode,
+  ConditionalActionCode,
+  ConditionalOrderSnapshot,
+  RfqAuctionSnapshot,
+  RfqMakerSnapshot,
+  // Phase 1639 — read snapshot types (PoVS / Hamilton / SkewMetrics / IF / CM)
+  PoVSStateSnapshot,
+  HamiltonSnapshot,
+  SkewMetricsSnapshot,
+  InsuranceFundSnapshot,
+  ClearingMemberSnapshot,
+  LstVaultSnapshot,
+  NativeSolVaultSnapshot,
+  SeriesListingSnapshot,
+  BuilderCodeSnapshot,
+  ComboIntentV2Snapshot,
+  CrossAssetSnapshot,
+  MicrostructureSnapshot,
+} from "./types";
+// Phase 1633.G — value exports for the const-object enums.
+export {
+  ConditionalKind,
+  ConditionalTriggerMode,
+  ConditionalTriggerDirection,
+  ConditionalAction,
 } from "./types";
 export {
   SKEW_PROGRAM_ID,
   findOptionPda,
   findEscrowPda,
   findOptionTokenMintPda,
+  findOptionCollateralLockPda,
   findFeeAccumulatorPda,
   findFeeAuthorityPda,
   findMetadataPda,
   findClearingMemberPda,
   findCmEscrowPda,
+  findPositionRegistryPda,
+  findCollateralPolicyPda,
+  findVolumeTrackerPda,
+  findFeeConfigPda,
   findMicrostructurePda,
   findCrossAssetMatrixPda,
   findHamiltonPda,
   findPovsStatePda,
   findLiqStatePda,
   findInsuranceFundPda,
+  findMakerAxePda,
   findIfEscrowPda,
+  findGovernancePda,
+  findSigmaIvPda,
   MPL_TOKEN_METADATA_PROGRAM_ID,
   resolvePythFeed,
   toOnChainStrike,
+  toSettlementUnits,
   toUsdcUnits,
+  settlementMintDecimals,
   isoToUnixSeconds,
   generateNonce,
   // V2.1 anchor instruction helpers (sub-1779)
@@ -43,5 +136,52 @@ export {
   mapPayoffToAnchor,
   fetchPythSpotUsd,
   ASSET_DEFAULT_SIGMA,
+  fromOnChainStrike,
+  fromUsdcUnits,
+  indexToUnderlying,
+  // Phase 1635-1637 — Isolated Margin / DVOL / Combo intent PDAs
+  findIsolatedVaultPda,
+  findIsolatedVaultEscrowPda,
+  findDvolPda,
+  findComboIntentPda,
+  findComboEscrowPda,
+  // Phase 1633.G — Mainnet hardening (conditional / RFQ / combo v2)
+  findConditionalOrderPda,
+  findRfqAuctionPda,
+  findRfqAuctionEscrowPda,
+  findRfqMakerPda,
+  findComboIntentV2Pda,
+  rfqQuoteDigest,
+  // Phase 1633.LST — jitoSOL collateral
+  findLstVaultPda,
+  findLstVaultEscrowPda,
+  JITOSOL_MINT,
+  JITOSOL_STAKE_POOL,
+  PYTH_SOL_USD_FEED,
+  // Phase 1A.2 (2026-05-04) — Native SOL collateral
+  findNativeSolVaultPda,
+  findNativeSolVaultEscrowPda,
+  NATIVE_SOL_MINT,
+  // Phase 1633.G — SkewMetrics
+  findSkewMetricsPda,
+  findSeriesListingPda,
+  findBuilderCodePda,
+  findBuilderEscrowPda,
+  findAuctionPda,
+  findAuctionEscrowPda,
 } from "./pda";
 export type { PayoffMapping } from "./pda";
+export { getMarginBreakdown } from "./margin";
+export type {
+  MarginBreakdownLeg,
+  MarginBreakdownResponse,
+  GetMarginBreakdownOptions,
+  VerifiedTier,
+} from "./margin";
+export { estimateFee } from "./fee";
+export type {
+  FeeBreakdown,
+  FeeSide,
+  EstimateFeeOptions,
+  EstimateFeeParams,
+} from "./fee";
