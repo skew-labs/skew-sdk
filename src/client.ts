@@ -60,6 +60,8 @@ import type {
   ConditionalActionCode,
   CrossAssetSnapshot,
   MicrostructureSnapshot,
+  CollateralPolicySnapshot,
+  TxSimulationResult,
 } from "./types";
 import {
   SKEW_PROGRAM_ID,
@@ -87,6 +89,7 @@ import {
   toOnChainStrike,
   toSettlementUnits,
   toUsdcUnits,
+  settlementMintDecimals,
   isoToUnixSeconds,
   // V2.1 anchor-instruction helpers (sub-1779)
   assetEnumIndex,
@@ -221,6 +224,71 @@ export class SkewClient {
 
   private _collateralPolicy(): PublicKey {
     return findCollateralPolicyPda()[0];
+  }
+
+  /**
+   * Read the live CollateralPolicyPda mint allowlist for this deployment.
+   *
+   * `getSkewCapabilities()` tells you what the protocol can support in
+   * principle. This method tells you what the currently deployed program has
+   * actually allowlisted at runtime, so bots/agents can preflight wSOL/jitoSOL
+   * or custom devnet mints before sending a mutating instruction.
+   */
+  async fetchCollateralPolicy(): Promise<CollateralPolicySnapshot> {
+    this._assertProgramLoaded();
+    const pda = this._collateralPolicy();
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const acc: any = await (this._program().account as any).collateralPolicyPda.fetch(pda);
+      const entryCount = Math.min(Number(acc.entryCount ?? 0), 8);
+      const entries = (acc.entries ?? [])
+        .slice(0, entryCount)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((entry: any) => {
+          const kindCode = Number(entry.kind ?? 255);
+          return {
+            mint: entry.mint as PublicKey,
+            decimals: Number(entry.decimals ?? 0),
+            kindCode,
+            kind: collateralPolicyKindLabel(kindCode),
+            oracleFeed: entry.oracleFeed as PublicKey,
+            maxDepegBps: Number(entry.maxDepegBps ?? 0),
+          };
+        });
+      return {
+        pda,
+        initialized: true,
+        bump: Number(acc.bump ?? 0),
+        entryCount,
+        entries,
+      };
+    } catch {
+      return {
+        pda,
+        initialized: false,
+        bump: null,
+        entryCount: 0,
+        entries: [],
+      };
+    }
+  }
+
+  private async _requireCollateralPolicyMint(mint: PublicKey): Promise<void> {
+    const policy = await this.fetchCollateralPolicy();
+    if (!policy.initialized) {
+      throw new Error(
+        `CollateralPolicyPda is not initialized at ${policy.pda.toBase58()}. ` +
+          "Run initCollateralPolicy/registerCollateralPolicyEntry on this deployment before custody writes.",
+      );
+    }
+    const entry = policy.entries.find((x) => x.mint.equals(mint));
+    if (!entry) {
+      const allowlist = policy.entries.map((x) => `${x.kind}:${x.mint.toBase58()}`).join(", ");
+      throw new Error(
+        `Settlement/collateral mint ${mint.toBase58()} is not registered in CollateralPolicyPda. ` +
+          `Registered mints: ${allowlist || "(none)"}. Call fetchCollateralPolicy() before routing.`,
+      );
+    }
   }
 
   private _hamiltonRemaining(): AccountMeta[] {
@@ -461,11 +529,13 @@ export class SkewClient {
 
     // Phase 2 (2026-05-04) — generic settlement mint. Default USDC.
     const settlementMint = params.settlementMint ?? this.usdcMint;
+    await this._requireCollateralPolicyMint(settlementMint);
+    const payoffDecimals = settlementMintDecimals(settlementMint);
 
     const pythFeed = resolvePythFeed(underlying);
     const strikeOnChain = toOnChainStrike(strike);
     const expiryTs = isoToUnixSeconds(expiry);
-    const payoffUnits = toUsdcUnits(notional);
+    const payoffUnits = toSettlementUnits(notional, settlementMint);
     const upperBoundOnChain = params.upperBound ? toOnChainStrike(params.upperBound) : 0n;
 
     // V2.1 derivations
@@ -492,7 +562,7 @@ export class SkewClient {
         new BN(strikeOnChain.toString()),
         new BN(expiryTs.toString()),
         new BN(payoffUnits.toString()),
-        6, // USDC decimals
+        payoffDecimals,
         new BN(upperBoundOnChain.toString()),
         extraParam, // f64
         new BN(spotI64.toString()), // i64: V0 spot stamp
@@ -513,8 +583,6 @@ export class SkewClient {
       .remainingAccounts(this._hamiltonRemaining())
       .transaction();
 
-    const createSig = await this._sendAndConfirm(createTx);
-
     // 2 — deposit_collateral (creator's settlement-mint ATA → escrow)
     const creatorAta = getAssociatedTokenAddressSync(settlementMint, creator);
     const depositTx = await this._program()
@@ -531,6 +599,21 @@ export class SkewClient {
       })
       .transaction();
 
+    if (params.simulateOnly === true || params.dryRun === true || params.simulate === true) {
+      const simulationTx = new Transaction();
+      simulationTx.add(...createTx.instructions, ...depositTx.instructions);
+      const simulation = await this._simulateTransaction(simulationTx);
+      return {
+        address: optionPda,
+        nonce,
+        createTx: "SIMULATED_CREATE_OPTION",
+        depositTx: "SIMULATED_DEPOSIT_COLLATERAL",
+        simulated: true,
+        simulation,
+      };
+    }
+
+    const createSig = await this._sendAndConfirm(createTx);
     const depositSig = await this._sendAndConfirm(depositTx);
 
     return {
@@ -1734,6 +1817,20 @@ export class SkewClient {
     return sig;
   }
 
+  private async _simulateTransaction(tx: Transaction): Promise<TxSimulationResult> {
+    const { blockhash } = await this.connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = this.wallet.publicKey;
+    const signed = await this.wallet.signTransaction(tx);
+    const sim = await this.connection.simulateTransaction(signed, undefined, false);
+    return {
+      ok: sim.value.err == null,
+      err: sim.value.err == null ? null : JSON.stringify(sim.value.err),
+      unitsConsumed: sim.value.unitsConsumed ?? undefined,
+      logs: sim.value.logs ?? [],
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Phase 1635 — Isolated Margin per-position vault
   //
@@ -2516,7 +2613,7 @@ export class SkewClient {
     kind: number; // ConditionalKind enum
     triggerOracle: PublicKey; // Pyth price account
     triggerPrice1e8: bigint; // i64
-    triggerDirection: number; // 0=Above, 1=Below
+    triggerDirection: number; // 0=Below, 1=Above
     triggerMode: number; // 0=Spot, 1=EMA
     triggerGraceSlots: number;
     action: number; // ConditionalAction enum
@@ -2549,6 +2646,7 @@ export class SkewClient {
         authority,
         order,
         actionTarget: args.actionTarget,
+        governance: findGovernancePda()[0],
         systemProgram: SystemProgram.programId,
       })
       .transaction();
@@ -2639,9 +2737,10 @@ export class SkewClient {
       .methods.registerOcoPair(toArgs(stopLoss), toArgs(takeProfit))
       .accounts({
         authority,
-        stopLossOrder,
-        takeProfitOrder,
+        orderA: stopLossOrder,
+        orderB: takeProfitOrder,
         actionTarget: stopLoss.actionTarget,
+        governance: findGovernancePda()[0],
         systemProgram: SystemProgram.programId,
       })
       .transaction();
@@ -2795,7 +2894,7 @@ export class SkewClient {
       expiryTs: bigint;
       payoffAmountMicro: bigint;
       optionType: number; // OptionTypeCode
-      direction: number; // ±1, or 0 for RangeAccrual
+      direction: number; // ±1 on the current Auction RFQ validator; RangeAccrual uses upperBound
       upperBound: bigint;
     };
     maxPremiumUsdc: number;
@@ -2818,6 +2917,10 @@ export class SkewClient {
       );
     }
     const buyerSettlementAta = getAssociatedTokenAddressSync(settlementMint, buyer);
+    const rfqDirection =
+      args.optionSpec.optionType === 3 && args.optionSpec.direction === 0
+        ? 1
+        : args.optionSpec.direction;
     const tx = await this._program()
       .methods.registerRfqAuction({
         auctionId: new BN(args.auctionId.toString()),
@@ -2827,7 +2930,10 @@ export class SkewClient {
           expiryTs: new BN(args.optionSpec.expiryTs.toString()),
           payoffAmountMicro: new BN(args.optionSpec.payoffAmountMicro.toString()),
           optionType: args.optionSpec.optionType,
-          direction: args.optionSpec.direction,
+          // Current Auction RFQ registration is price discovery only and
+          // validates +/-1. RangeAccrual semantics are preserved by
+          // optionType=3 + upperBound; relay fills use direction=0 later.
+          direction: rfqDirection,
           upperBound: new BN(args.optionSpec.upperBound.toString()),
         },
         maxPremiumMicro: new BN(toUsdcUnits(args.maxPremiumUsdc).toString()),
@@ -3924,14 +4030,13 @@ export class SkewClient {
   ): Promise<ConditionalOrderSnapshot | null> {
     const [pda] = findConditionalOrderPda(authority, orderId);
     const info = await this.connection.getAccountInfo(pda, "confirmed");
-    if (!info || info.data.length < 288) return null;
+    if (!info || info.data.length < 286) return null;
     const buf = info.data;
     const stateMap: Record<number, ConditionalOrderSnapshot["state"]> = {
       0: "Active",
-      1: "GracePending",
-      2: "Triggered",
-      3: "Cancelled",
-      4: "Expired",
+      1: "Triggered",
+      2: "Cancelled",
+      3: "Expired",
     };
     return {
       pda,
@@ -3961,8 +4066,9 @@ export class SkewClient {
     const buf = info.data;
     const stateMap: Record<number, RfqAuctionSnapshot["state"]> = {
       0: "Open",
-      1: "Settled",
-      2: "Cancelled",
+      1: "Closed",
+      2: "Settled",
+      3: "Cancelled",
     };
     const mmKey = new PublicKey(buf.subarray(112, 144));
     const hasQuote = !mmKey.equals(PublicKey.default);
@@ -4123,6 +4229,13 @@ interface RawOptionAccount {
 
 function bnToBigint(value: BN): bigint {
   return BigInt(value.toString());
+}
+
+function collateralPolicyKindLabel(kindCode: number): "stable" | "native" | "lst" | "unknown" {
+  if (kindCode === 0) return "stable";
+  if (kindCode === 1) return "native";
+  if (kindCode === 2) return "lst";
+  return "unknown";
 }
 
 function decodeOptionAccount(pda: PublicKey, raw: unknown): OptionSummary | null {

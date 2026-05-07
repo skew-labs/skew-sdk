@@ -50,6 +50,7 @@ const HERMES_FEEDS: Record<string, string> = {
   ETH:  "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
   SOL:  "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
   XRP:  "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
+  HYPE: "4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
 };
 async function spotFor(asset: string): Promise<number> {
   const id = HERMES_FEEDS[asset];

@@ -1,6 +1,6 @@
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import { Program, type Wallet, type Idl } from "@coral-xyz/anchor";
-import type { CreateParams, CreateResult, BuyResult, SettleResult, RegisterCmParams, RegisterCmResult, TxResult, MarginCalcResult, ListOptionsOpts, OptionSummary, IsolatedVaultSnapshot, DvolSnapshot, ComboLeg, ComboIntentSnapshot, RecoveryWinnerCm, RecoveryStepResult, PoVSStateSnapshot, HamiltonSnapshot, SkewMetricsSnapshot, InsuranceFundSnapshot, ClearingMemberSnapshot, LstVaultSnapshot, NativeSolVaultSnapshot, SeriesListingSnapshot, BuilderCodeSnapshot, ConditionalOrderSnapshot, RfqAuctionSnapshot, ComboIntentV2Snapshot, CrossAssetSnapshot, MicrostructureSnapshot } from "./types";
+import type { CreateParams, CreateResult, BuyResult, SettleResult, RegisterCmParams, RegisterCmResult, TxResult, MarginCalcResult, ListOptionsOpts, OptionSummary, IsolatedVaultSnapshot, DvolSnapshot, ComboLeg, ComboIntentSnapshot, RecoveryWinnerCm, RecoveryStepResult, PoVSStateSnapshot, HamiltonSnapshot, SkewMetricsSnapshot, InsuranceFundSnapshot, ClearingMemberSnapshot, LstVaultSnapshot, NativeSolVaultSnapshot, SeriesListingSnapshot, BuilderCodeSnapshot, ConditionalOrderSnapshot, RfqAuctionSnapshot, ComboIntentV2Snapshot, CrossAssetSnapshot, MicrostructureSnapshot, CollateralPolicySnapshot } from "./types";
 export interface SkewClientOptions {
     programId?: string;
     usdcMint?: string;
@@ -46,6 +46,16 @@ export declare class SkewClient {
     /** Back-compat alias for guard checks. */
     private _assertProgramLoaded;
     private _collateralPolicy;
+    /**
+     * Read the live CollateralPolicyPda mint allowlist for this deployment.
+     *
+     * `getSkewCapabilities()` tells you what the protocol can support in
+     * principle. This method tells you what the currently deployed program has
+     * actually allowlisted at runtime, so bots/agents can preflight wSOL/jitoSOL
+     * or custom devnet mints before sending a mutating instruction.
+     */
+    fetchCollateralPolicy(): Promise<CollateralPolicySnapshot>;
+    private _requireCollateralPolicyMint;
     private _hamiltonRemaining;
     private _povsRemaining;
     private _positionRegistryRemaining;
@@ -386,6 +396,7 @@ export declare class SkewClient {
     listOptions(opts?: ListOptionsOpts): Promise<OptionSummary[]>;
     private _fetchOption;
     private _sendAndConfirm;
+    private _simulateTransaction;
     /**
      * One-shot per (user, option) — initialise the IsolatedVault PDA + escrow ATA.
      * Caller pays rent (~0.004 SOL).

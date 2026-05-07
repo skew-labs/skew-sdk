@@ -76,6 +76,66 @@ class SkewClient {
     _collateralPolicy() {
         return (0, pda_1.findCollateralPolicyPda)()[0];
     }
+    /**
+     * Read the live CollateralPolicyPda mint allowlist for this deployment.
+     *
+     * `getSkewCapabilities()` tells you what the protocol can support in
+     * principle. This method tells you what the currently deployed program has
+     * actually allowlisted at runtime, so bots/agents can preflight wSOL/jitoSOL
+     * or custom devnet mints before sending a mutating instruction.
+     */
+    async fetchCollateralPolicy() {
+        this._assertProgramLoaded();
+        const pda = this._collateralPolicy();
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const acc = await this._program().account.collateralPolicyPda.fetch(pda);
+            const entryCount = Math.min(Number(acc.entryCount ?? 0), 8);
+            const entries = (acc.entries ?? [])
+                .slice(0, entryCount)
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                .map((entry) => {
+                const kindCode = Number(entry.kind ?? 255);
+                return {
+                    mint: entry.mint,
+                    decimals: Number(entry.decimals ?? 0),
+                    kindCode,
+                    kind: collateralPolicyKindLabel(kindCode),
+                    oracleFeed: entry.oracleFeed,
+                    maxDepegBps: Number(entry.maxDepegBps ?? 0),
+                };
+            });
+            return {
+                pda,
+                initialized: true,
+                bump: Number(acc.bump ?? 0),
+                entryCount,
+                entries,
+            };
+        }
+        catch {
+            return {
+                pda,
+                initialized: false,
+                bump: null,
+                entryCount: 0,
+                entries: [],
+            };
+        }
+    }
+    async _requireCollateralPolicyMint(mint) {
+        const policy = await this.fetchCollateralPolicy();
+        if (!policy.initialized) {
+            throw new Error(`CollateralPolicyPda is not initialized at ${policy.pda.toBase58()}. ` +
+                "Run initCollateralPolicy/registerCollateralPolicyEntry on this deployment before custody writes.");
+        }
+        const entry = policy.entries.find((x) => x.mint.equals(mint));
+        if (!entry) {
+            const allowlist = policy.entries.map((x) => `${x.kind}:${x.mint.toBase58()}`).join(", ");
+            throw new Error(`Settlement/collateral mint ${mint.toBase58()} is not registered in CollateralPolicyPda. ` +
+                `Registered mints: ${allowlist || "(none)"}. Call fetchCollateralPolicy() before routing.`);
+        }
+    }
     _hamiltonRemaining() {
         return [0, 1, 2, 3, 4].map((assetIdx) => ({
             pubkey: (0, pda_1.findHamiltonPda)(assetIdx)[0],
@@ -276,10 +336,12 @@ class SkewClient {
         const [metadataPda] = (0, pda_1.findMetadataPda)(optionTokenMintPda);
         // Phase 2 (2026-05-04) — generic settlement mint. Default USDC.
         const settlementMint = params.settlementMint ?? this.usdcMint;
+        await this._requireCollateralPolicyMint(settlementMint);
+        const payoffDecimals = (0, pda_1.settlementMintDecimals)(settlementMint);
         const pythFeed = (0, pda_1.resolvePythFeed)(underlying);
         const strikeOnChain = (0, pda_1.toOnChainStrike)(strike);
         const expiryTs = (0, pda_1.isoToUnixSeconds)(expiry);
-        const payoffUnits = (0, pda_1.toUsdcUnits)(notional);
+        const payoffUnits = (0, pda_1.toSettlementUnits)(notional, settlementMint);
         const upperBoundOnChain = params.upperBound ? (0, pda_1.toOnChainStrike)(params.upperBound) : 0n;
         // V2.1 derivations
         const assetIdx = (0, pda_1.assetEnumIndex)(underlying);
@@ -296,8 +358,7 @@ class SkewClient {
         const createTx = await this._program()
             .methods.createOption(new anchor_1.BN(nonce.toString()), mapping.optionType, assetIdx, // u8: 5-asset enum index
         directionWire, // i8: +1 buy / -1 sell
-        new anchor_1.BN(strikeOnChain.toString()), new anchor_1.BN(expiryTs.toString()), new anchor_1.BN(payoffUnits.toString()), 6, // USDC decimals
-        new anchor_1.BN(upperBoundOnChain.toString()), extraParam, // f64
+        new anchor_1.BN(strikeOnChain.toString()), new anchor_1.BN(expiryTs.toString()), new anchor_1.BN(payoffUnits.toString()), payoffDecimals, new anchor_1.BN(upperBoundOnChain.toString()), extraParam, // f64
         new anchor_1.BN(spotI64.toString()), // i64: V0 spot stamp
         sigmaAtCreation)
             .accounts({
@@ -314,7 +375,6 @@ class SkewClient {
         })
             .remainingAccounts(this._hamiltonRemaining())
             .transaction();
-        const createSig = await this._sendAndConfirm(createTx);
         // 2 — deposit_collateral (creator's settlement-mint ATA → escrow)
         const creatorAta = (0, spl_token_1.getAssociatedTokenAddressSync)(settlementMint, creator);
         const depositTx = await this._program()
@@ -330,6 +390,20 @@ class SkewClient {
             systemProgram: web3_js_1.SystemProgram.programId,
         })
             .transaction();
+        if (params.simulateOnly === true || params.dryRun === true || params.simulate === true) {
+            const simulationTx = new web3_js_1.Transaction();
+            simulationTx.add(...createTx.instructions, ...depositTx.instructions);
+            const simulation = await this._simulateTransaction(simulationTx);
+            return {
+                address: optionPda,
+                nonce,
+                createTx: "SIMULATED_CREATE_OPTION",
+                depositTx: "SIMULATED_DEPOSIT_COLLATERAL",
+                simulated: true,
+                simulation,
+            };
+        }
+        const createSig = await this._sendAndConfirm(createTx);
         const depositSig = await this._sendAndConfirm(depositTx);
         return {
             address: optionPda,
@@ -1350,6 +1424,19 @@ class SkewClient {
         await this.connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
         return sig;
     }
+    async _simulateTransaction(tx) {
+        const { blockhash } = await this.connection.getLatestBlockhash("confirmed");
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = this.wallet.publicKey;
+        const signed = await this.wallet.signTransaction(tx);
+        const sim = await this.connection.simulateTransaction(signed, undefined, false);
+        return {
+            ok: sim.value.err == null,
+            err: sim.value.err == null ? null : JSON.stringify(sim.value.err),
+            unitsConsumed: sim.value.unitsConsumed ?? undefined,
+            logs: sim.value.logs ?? [],
+        };
+    }
     // -------------------------------------------------------------------------
     // Phase 1635 — Isolated Margin per-position vault
     //
@@ -2048,6 +2135,7 @@ class SkewClient {
             authority,
             order,
             actionTarget: args.actionTarget,
+            governance: (0, pda_1.findGovernancePda)()[0],
             systemProgram: web3_js_1.SystemProgram.programId,
         })
             .transaction();
@@ -2124,9 +2212,10 @@ class SkewClient {
             .methods.registerOcoPair(toArgs(stopLoss), toArgs(takeProfit))
             .accounts({
             authority,
-            stopLossOrder,
-            takeProfitOrder,
+            orderA: stopLossOrder,
+            orderB: takeProfitOrder,
             actionTarget: stopLoss.actionTarget,
+            governance: (0, pda_1.findGovernancePda)()[0],
             systemProgram: web3_js_1.SystemProgram.programId,
         })
             .transaction();
@@ -2257,6 +2346,9 @@ class SkewClient {
             throw new Error("registerRfqAuction: current on-chain RFQ v1 is USDC/stable-only; use atomic_fill_from_relay / CM collateral paths for SOL or jitoSOL capacity.");
         }
         const buyerSettlementAta = (0, spl_token_1.getAssociatedTokenAddressSync)(settlementMint, buyer);
+        const rfqDirection = args.optionSpec.optionType === 3 && args.optionSpec.direction === 0
+            ? 1
+            : args.optionSpec.direction;
         const tx = await this._program()
             .methods.registerRfqAuction({
             auctionId: new anchor_1.BN(args.auctionId.toString()),
@@ -2266,7 +2358,10 @@ class SkewClient {
                 expiryTs: new anchor_1.BN(args.optionSpec.expiryTs.toString()),
                 payoffAmountMicro: new anchor_1.BN(args.optionSpec.payoffAmountMicro.toString()),
                 optionType: args.optionSpec.optionType,
-                direction: args.optionSpec.direction,
+                // Current Auction RFQ registration is price discovery only and
+                // validates +/-1. RangeAccrual semantics are preserved by
+                // optionType=3 + upperBound; relay fills use direction=0 later.
+                direction: rfqDirection,
                 upperBound: new anchor_1.BN(args.optionSpec.upperBound.toString()),
             },
             maxPremiumMicro: new anchor_1.BN((0, pda_1.toUsdcUnits)(args.maxPremiumUsdc).toString()),
@@ -3190,15 +3285,14 @@ class SkewClient {
     async fetchConditionalOrder(authority, orderId) {
         const [pda] = (0, pda_1.findConditionalOrderPda)(authority, orderId);
         const info = await this.connection.getAccountInfo(pda, "confirmed");
-        if (!info || info.data.length < 288)
+        if (!info || info.data.length < 286)
             return null;
         const buf = info.data;
         const stateMap = {
             0: "Active",
-            1: "GracePending",
-            2: "Triggered",
-            3: "Cancelled",
-            4: "Expired",
+            1: "Triggered",
+            2: "Cancelled",
+            3: "Expired",
         };
         return {
             pda,
@@ -3228,8 +3322,9 @@ class SkewClient {
         const buf = info.data;
         const stateMap = {
             0: "Open",
-            1: "Settled",
-            2: "Cancelled",
+            1: "Closed",
+            2: "Settled",
+            3: "Cancelled",
         };
         const mmKey = new web3_js_1.PublicKey(buf.subarray(112, 144));
         const hasQuote = !mmKey.equals(web3_js_1.PublicKey.default);
@@ -3354,6 +3449,15 @@ function decodeAnchorEnum(raw, table) {
 }
 function bnToBigint(value) {
     return BigInt(value.toString());
+}
+function collateralPolicyKindLabel(kindCode) {
+    if (kindCode === 0)
+        return "stable";
+    if (kindCode === 1)
+        return "native";
+    if (kindCode === 2)
+        return "lst";
+    return "unknown";
 }
 function decodeOptionAccount(pda, raw) {
     const acc = raw;

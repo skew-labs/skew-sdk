@@ -76,8 +76,25 @@ export type PayoffType =
  */
 export type Direction = "buy" | "sell";
 
+export interface TxSimulationResult {
+  /** True when the transaction simulation completed without an on-chain error. */
+  ok: boolean;
+  /** Raw Solana simulation error, stringified for JSON/MCP friendliness. */
+  err: string | null;
+  /** Compute units reported by the RPC simulator, when available. */
+  unitsConsumed?: number;
+  /** Program logs returned by simulation. */
+  logs: string[];
+}
+
 /**
- * Human-readable params for `SkewClient.create()`. All units are USD / ISO dates.
+ * Human-readable params for `SkewClient.create()`.
+ * Price fields are USD / ISO dates. The payoff notional unit depends on the
+ * settlement mint:
+ *   - USDC settlement: `notional` is USD/USDC, converted with 6 decimals.
+ *   - wSOL/jitoSOL settlement: `notional` is base asset units, converted with
+ *     the mint decimals. Example: `notional: 0.5` means 0.5 SOL/jitoSOL, not
+ *     $0.50.
  *
  * Anchor `create_option` v2.1 takes 12 args. The SDK derives the wire-level
  * args from these high-level fields:
@@ -85,7 +102,7 @@ export type Direction = "buy" | "sell";
  *   - `payoff`            → option_type + (default) direction
  *   - `strike`            → strike: u64 (USD × 10^8 per Pyth expo)
  *   - `expiry`            → expiry_ts: i64 (unix seconds)
- *   - `notional`          → payoff_amount: u64 (USDC × 10^6)
+ *   - `notional`          → payoff_amount: u64 (settlement mint units)
  *   - `extraParam`        → extra_param: f64 (Range Accrual upper, capped K_cap, etc.)
  *   - `direction`         → direction: i8 (override of default)
  *   - `spotAtCreation`    → spot_at_creation: i64 (V0 stamp; auto-fetched from Pyth)
@@ -100,7 +117,12 @@ export interface CreateParams {
   strike: number;
   /** ISO 8601 UTC expiry, e.g. "2026-04-25T16:00:00Z". */
   expiry: string;
-  /** Max payoff in USD (e.g. 1000 for $1,000 USDC). */
+  /**
+   * Max payoff in settlement units.
+   * USDC settlement: USD/USDC amount, e.g. 1000 means $1,000.
+   * wSOL/jitoSOL settlement: base token amount, e.g. 0.5 means 0.5 SOL-family
+   * token. Use `settlementMint` to make this unit unambiguous.
+   */
   notional: number;
   /**
    * Extra parameter for option types that need one:
@@ -145,6 +167,14 @@ export interface CreateParams {
    * option underlying for the structurally right-way invariant W-WW5 to hold.
    */
   settlementMint?: PublicKey;
+  /**
+   * Simulation-only mode. Builds the same create+deposit instruction sequence,
+   * runs RPC simulation, and returns logs/CU without sending or consuming fees.
+   * `dryRun` and `simulate` are accepted as aliases for agent/tooling ergonomics.
+   */
+  simulateOnly?: boolean;
+  dryRun?: boolean;
+  simulate?: boolean;
 }
 
 export interface CreateResult {
@@ -156,6 +186,10 @@ export interface CreateResult {
   createTx: string;
   /** deposit_collateral transaction signature */
   depositTx: string;
+  /** True when no transaction was sent because `simulateOnly`/`dryRun`/`simulate` was set. */
+  simulated?: boolean;
+  /** Combined create+deposit simulation result, present for simulation-only calls. */
+  simulation?: TxSimulationResult;
 }
 
 export interface BuyParams {
@@ -202,6 +236,27 @@ export interface RegisterCmResult {
 /** Result of any single-tx mutation (transfer, cancel, close, collateral). */
 export interface TxResult {
   txSignature: string;
+  simulated?: boolean;
+  simulation?: TxSimulationResult;
+}
+
+export type CollateralPolicyKind = "stable" | "native" | "lst" | "unknown";
+
+export interface CollateralPolicyEntrySnapshot {
+  mint: PublicKey;
+  decimals: number;
+  kindCode: number;
+  kind: CollateralPolicyKind;
+  oracleFeed: PublicKey;
+  maxDepegBps: number;
+}
+
+export interface CollateralPolicySnapshot {
+  pda: PublicKey;
+  initialized: boolean;
+  bump: number | null;
+  entryCount: number;
+  entries: CollateralPolicyEntrySnapshot[];
 }
 
 /**
@@ -448,8 +503,8 @@ export type ConditionalTriggerModeCode =
 
 /** `register_conditional_order::trigger_direction` — which side of the trigger. */
 export const ConditionalTriggerDirection = {
-  Above: 0,
-  Below: 1,
+  Below: 0,
+  Above: 1,
 } as const;
 export type ConditionalTriggerDirectionCode =
   (typeof ConditionalTriggerDirection)[keyof typeof ConditionalTriggerDirection];
@@ -459,9 +514,9 @@ export type ConditionalTriggerDirectionCode =
  * dispatch when the trigger condition has held for `triggerGraceSlots`.
  */
 export const ConditionalAction = {
-  EarlyExercise: 0,
-  CloseIsolated: 1,
-  SellViaRfq: 2,
+  SellViaRfq: 0,
+  EarlyExercise: 1,
+  CloseIsolated: 2,
   BuybackViaRfq: 3,
 } as const;
 export type ConditionalActionCode = (typeof ConditionalAction)[keyof typeof ConditionalAction];
@@ -482,7 +537,7 @@ export interface ConditionalOrderSnapshot {
   triggerPrice1e8: bigint;
   triggerOracle: PublicKey;
   triggerGraceSlots: number;
-  state: "Active" | "GracePending" | "Triggered" | "Cancelled" | "Expired";
+  state: "Active" | "Triggered" | "Cancelled" | "Expired";
   action: ConditionalActionCode;
   actionTarget: PublicKey;
   actionMinPremiumMicro: bigint;
@@ -509,7 +564,7 @@ export interface RfqAuctionSnapshot {
   maxPremiumMicro: bigint;
   auctionOpenSlot: bigint;
   auctionCloseSlot: bigint;
-  state: "Open" | "Settled" | "Cancelled";
+  state: "Open" | "Closed" | "Settled" | "Cancelled";
   bestQuotePremiumMicro: bigint | null;
   bestQuoteMm: PublicKey | null;
   bestQuoteValidUntilSlot: bigint | null;

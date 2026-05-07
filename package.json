@@ -1,6 +1,6 @@
 {
   "name": "@skew-labs/sdk",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "description": "TypeScript SDK for Skew — Solana options infrastructure. Create, buy, settle options in five lines.",
   "license": "MIT",
   "main": "./dist/index.js",

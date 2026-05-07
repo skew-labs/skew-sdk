@@ -15,7 +15,7 @@ keeper services that need direct protocol access without the web terminal.
 
 ## Package Surface
 
-- 90 typed methods across clearing members, option lifecycle, Instant RFQ,
+- 91 typed methods across clearing members, option lifecycle, Instant RFQ,
   Auction RFQ, collateral vaults, liquidation, insurance fund, builder codes,
   series listings, and settlement.
 - 36 PDA helpers for bots and indexers that need deterministic account
@@ -28,6 +28,8 @@ keeper services that need direct protocol access without the web terminal.
   the same payload shape as the terminal.
 - IV oracle access: `findPovsStatePda()` + `fetchPovs()` expose the PoVS state vector (`sigma_t`, `sigma_inf`, `theta_d`, `vrp_rel`, ATM IV, regime, tail fields). `POST /surface` turns that into the public Heston × SSVI strike/tenor grid.
 - Capability map: `getSkewCapabilities()` exposes 5 underlyings, 11 payoff names, collateral rails, and every public trade lane for dApps, bots, and MCP agents.
+- Runtime collateral policy reader: `fetchCollateralPolicy()` reads the live mint allowlist for the current deployment. Use it before routing wSOL/jitoSOL or custom devnet mints; capabilities describe protocol support, while the policy PDA describes what this deployment actually accepts.
+- Simulation-first writes: `create({ dryRun: true })`, `create({ simulate: true })`, or `create({ simulateOnly: true })` runs create+deposit preflight and returns logs/CU without sending or consuming fees.
 - Sanitized IDL bundled at `@skew-labs/sdk/idl/skew_master.json`.
 - Naming map SDK ↔ REST so MM bots reading the OpenAPI spec use the same verbs
   as the SDK.
@@ -62,6 +64,14 @@ const skew     = SkewClient.fromProgram(conn, wallet, program);
 
 > **Footgun.** Bare `new SkewClient(conn, wallet)` constructs but throws on every method call. Always `SkewClient.fromProgram(...)`.
 
+For scripts and bots, prefer an explicit devnet keypair path:
+
+```bash
+export KEYPAIR_PATH=~/.config/solana/devnet.json
+# or in MCP/agent processes:
+export SKEW_KEYPAIR_PATH=~/.config/solana/devnet.json
+```
+
 ## Capability map
 
 ```typescript
@@ -78,6 +88,16 @@ Use this map when building dApps or bots so route selection is explicit:
 Instant RFQ is the 1-click HIT lane; Auction RFQ is price discovery/finalization;
 pre-funded listings are the simple writer-first primitive.
 
+Capabilities are static. Before sending custody instructions, read runtime
+deployment state:
+
+```typescript
+const policy = await skew.fetchCollateralPolicy();
+if (!policy.entries.some((e) => e.mint.equals(mySettlementMint))) {
+  throw new Error("settlement mint is not allowlisted on this deployment");
+}
+```
+
 ---
 
 ## End-to-end in five lines
@@ -92,13 +112,29 @@ await buyerSkew.buy(opt.address, 50); // separate buyer; creator == buyer is blo
 await skew.settle(opt.address);    // anyone can call after expiry
 ```
 
+For non-USDC settlement, `notional` is **base token units**, not USD:
+
+```typescript
+// 0.5 means 0.5 wSOL/jitoSOL payoff cap, not $0.50.
+const preview = await skew.create({
+  underlying: "SOL",
+  payoff: "vanilla_inverse_call",
+  strike: 180,
+  expiry: "2026-05-10T16:00:00Z",
+  notional: 0.5,
+  settlementMint: NATIVE_SOL_MINT,
+  dryRun: true,
+});
+console.log(preview.simulation);
+```
+
 That's the happy path. The other ~86 methods exist because real trading needs collateral top-ups, transfers, cancellations, multi-leg combos, isolated margin, liquidations, conditional orders (SL / TP / OCO), escrow-aware RFQ auctions with ed25519-verified MM quotes, 32-leg combo intents, secondary-market Dutch auctions, builder-code revenue share, series-listing keepers, LST-backed Verified-tier lockup, and the long tail of bookkeeping the on-chain program enforces.
 
 Methods are grouped below. **Mainnet hardening additions** (conditional orders, RFQ auctions, combo intent v2 — 22 methods total) are GA on devnet as of 2026-05-01 and have their own dedicated sections.
 
 ---
 
-## Methods (90)
+## Methods (91)
 
 ### Clearing Member lifecycle (4)
 
@@ -163,7 +199,7 @@ Triggered exits — perm-less Pyth EMA crank fires `executeConditionalOrder` whe
 
 | Method | Anchor ix | Notes |
 |---|---|---|
-| `registerConditionalOrder({ orderId, kind, triggerOracle, triggerPrice1e8, triggerDirection, triggerMode, triggerGraceSlots, action, actionTarget, actionMinPremiumMicro, actionMaxPremiumMicro, actionMaxSlippageBps, validUntilTs })` | `register_conditional_order` | `kind` 0=SL / 1=TP. `triggerMode` 0=Spot / 1=EMA. `action` 0=EarlyExercise / 1=CloseIsolated / 2=SellViaRfq / 3=BuybackViaRfq. |
+| `registerConditionalOrder({ orderId, kind, triggerOracle, triggerPrice1e8, triggerDirection, triggerMode, triggerGraceSlots, action, actionTarget, actionMinPremiumMicro, actionMaxPremiumMicro, actionMaxSlippageBps, validUntilTs })` | `register_conditional_order` | `kind` 0=SL / 1=TP. `triggerMode` 0=Spot / 1=EMA. `triggerDirection` 0=Below / 1=Above. `action` 0=SellViaRfq / 1=EarlyExercise / 2=CloseIsolated / 3=BuybackViaRfq. Only CloseIsolated is live; the other apply paths fail-closed until direct CPI ships. |
 | `cancelConditionalOrder(orderId)` | `cancel_conditional_order` | Buyer-initiated rollback. PDA closed → rent + keeper-reward refund. |
 | `executeConditionalOrder(orderAuthority, orderId, pythOracle)` | `execute_conditional_order` | Perm-less keeper trigger. Flips Active → Triggered. |
 | `registerOcoPair(stopLossArgs, takeProfitArgs)` | `register_oco_pair` | Atomic SL+TP — first to trigger cancels the other (sticky-terminal invariant). |
@@ -252,11 +288,12 @@ shares accrue into the per-builder escrow and are withdrawn with
 `withdrawBuilderFees`, while wSOL / jitoSOL physical shares pay directly to
 the builder's settlement-mint token account inside `atomic_fill_from_relay`.
 
-### Reads (1)
+### Reads (2)
 
 | Method | What it does |
 |---|---|
 | `listOptions(opts?)` | `getProgramAccounts` decoded into typed `OptionSummary[]` with filters (underlying / type / state / sortBy / limit). For high-frequency reads use the Neon-backed indexer at `/api/options`. |
+| `fetchCollateralPolicy()` | Reads the live `CollateralPolicyPda` mint allowlist: registered mint, decimals, kind, oracle feed, and depeg fence. Use before routing non-USDC settlement/collateral. |
 
 ---
 

@@ -17,17 +17,17 @@ exports.ConditionalTriggerMode = {
 };
 /** `register_conditional_order::trigger_direction` — which side of the trigger. */
 exports.ConditionalTriggerDirection = {
-    Above: 0,
-    Below: 1,
+    Below: 0,
+    Above: 1,
 };
 /**
  * `register_conditional_order::action` — what `apply_*_action` call to
  * dispatch when the trigger condition has held for `triggerGraceSlots`.
  */
 exports.ConditionalAction = {
-    EarlyExercise: 0,
-    CloseIsolated: 1,
-    SellViaRfq: 2,
+    SellViaRfq: 0,
+    EarlyExercise: 1,
+    CloseIsolated: 2,
     BuybackViaRfq: 3,
 };
 //# sourceMappingURL=types.js.map
