@@ -1,6 +1,10 @@
-import { PublicKey, Transaction } from "@solana/web3.js";
+import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+type SignableTransaction = Transaction | VersionedTransaction;
 export declare const INSTANT_RFQ_DEFAULT_RELAY_URL = "wss://skew-relay-devnet.fly.dev/subscribe";
-export declare const RELAY_PAYLOAD_LEN: 100;
+export declare const INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = 600;
+export declare const INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = 60000;
+export declare const INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS = 120000;
+export declare const RELAY_PAYLOAD_LEN: 132;
 export declare class RfqWalletMessageSigningUnsupported extends Error {
     readonly code = "RFQ_WALLET_MESSAGE_SIGNING_UNSUPPORTED";
     constructor(cause?: unknown);
@@ -19,6 +23,11 @@ export interface RelayPayload {
     extraParam: number;
     premium: bigint;
     settlementMint: Uint8Array;
+    /** Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding (32 B at offsets
+     *  100..132). The on-chain handler asserts
+     *  `payload.buyer == ctx.accounts.buyer.key()` so a relay-compromised
+     *  cm_sig cannot be replayed against a different buyer Signer. */
+    buyer: Uint8Array;
 }
 export interface InstantRfqOptionSpec {
     asset: number;
@@ -48,15 +57,24 @@ export interface InstantRfqHitResult {
     riskPreflight?: {
         status?: string;
         preImMicro?: bigint;
+        preImUsd?: number;
         postImMicro?: bigint;
+        postImUsd?: number;
         requiredDeltaMicro?: bigint;
+        requiredDeltaUsd?: number;
         freeCollateralMicro?: bigint;
+        freeCollateralUsd?: number;
         afterFillFreeMicro?: bigint;
+        afterFillFreeUsd?: number;
         healthBeforeBps?: bigint;
         healthAfterBps?: bigint;
         marginalImLockedMicro?: bigint;
+        marginalImLockedUsd?: number;
+        marginalImLockedPctOfNotional?: number;
         feeMicro?: bigint;
+        feeUsd?: number;
         premiumMicro?: bigint;
+        premiumUsd?: number;
         mmp?: string;
         positionAccounts?: number;
     };
@@ -69,6 +87,11 @@ export declare function buildRelayPayload(args: {
     settlementMint: PublicKey | Uint8Array;
     settlementDecimals?: number;
     quoteExpiryTs?: bigint;
+    /** Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding. Required: the buyer
+     *  wallet that will sign the atomic_fill_from_relay transaction. Bound
+     *  into the digest so a stolen cm_sig cannot replay against a different
+     *  buyer Signer. */
+    buyer: PublicKey | Uint8Array;
 }): RelayPayload;
 export declare function encodeRelayPayload(payload: RelayPayload): Uint8Array;
 export declare function relayPayloadDigest(payloadOrBytes: RelayPayload | Uint8Array): Uint8Array;
@@ -87,7 +110,7 @@ type InstantRfqHitBaseArgs = {
     buyer: PublicKey;
     cmPubkey: PublicKey;
     payload: RelayPayload;
-    signTransaction: (transaction: Transaction) => Promise<Transaction>;
+    signTransaction: <T extends SignableTransaction>(transaction: T) => Promise<T>;
     relayUrl?: string;
     timeoutMs?: number;
 };

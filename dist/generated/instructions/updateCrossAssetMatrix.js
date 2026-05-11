@@ -1,0 +1,101 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.layout = void 0;
+exports.updateCrossAssetMatrix = updateCrossAssetMatrix;
+const web3_js_1 = require("@solana/web3.js"); // eslint-disable-line @typescript-eslint/no-unused-vars
+const borsh = __importStar(require("@coral-xyz/borsh")); // eslint-disable-line @typescript-eslint/no-unused-vars
+const programId_1 = require("../programId");
+exports.layout = borsh.struct([
+    borsh.u32("rho_p5_btc_eth_micro"),
+    borsh.u32("rho_p5_btc_sol_micro"),
+    borsh.u32("rho_p5_btc_xrp_micro"),
+    borsh.u32("rho_p5_btc_hype_micro"),
+    borsh.u32("rho_p5_eth_sol_micro"),
+    borsh.u32("rho_p5_eth_xrp_micro"),
+    borsh.u32("rho_p5_eth_hype_micro"),
+    borsh.u32("rho_p5_sol_xrp_micro"),
+    borsh.u32("rho_p5_sol_hype_micro"),
+    borsh.u32("rho_p5_xrp_hype_micro"),
+    borsh.u32("stress_btc_eth_micro"),
+    borsh.u32("stress_btc_sol_micro"),
+    borsh.u32("stress_btc_xrp_micro"),
+    borsh.u32("stress_btc_hype_micro"),
+    borsh.u32("stress_eth_sol_micro"),
+    borsh.u32("stress_eth_xrp_micro"),
+    borsh.u32("stress_eth_hype_micro"),
+    borsh.u32("stress_sol_xrp_micro"),
+    borsh.u32("stress_sol_hype_micro"),
+    borsh.u32("stress_xrp_hype_micro"),
+    borsh.bool("update_p5"),
+    borsh.bool("update_stress"),
+]);
+function updateCrossAssetMatrix(args, accounts, programId = programId_1.PROGRAM_ID) {
+    const keys = [
+        { pubkey: accounts.authority, isSigner: true, isWritable: true },
+        { pubkey: accounts.matrix, isSigner: false, isWritable: true },
+        { pubkey: accounts.system_program, isSigner: false, isWritable: false },
+    ];
+    const identifier = Buffer.from([108, 239, 157, 100, 48, 251, 94, 45]);
+    const buffer = Buffer.alloc(1000);
+    const len = exports.layout.encode({
+        rho_p5_btc_eth_micro: args.rho_p5_btc_eth_micro,
+        rho_p5_btc_sol_micro: args.rho_p5_btc_sol_micro,
+        rho_p5_btc_xrp_micro: args.rho_p5_btc_xrp_micro,
+        rho_p5_btc_hype_micro: args.rho_p5_btc_hype_micro,
+        rho_p5_eth_sol_micro: args.rho_p5_eth_sol_micro,
+        rho_p5_eth_xrp_micro: args.rho_p5_eth_xrp_micro,
+        rho_p5_eth_hype_micro: args.rho_p5_eth_hype_micro,
+        rho_p5_sol_xrp_micro: args.rho_p5_sol_xrp_micro,
+        rho_p5_sol_hype_micro: args.rho_p5_sol_hype_micro,
+        rho_p5_xrp_hype_micro: args.rho_p5_xrp_hype_micro,
+        stress_btc_eth_micro: args.stress_btc_eth_micro,
+        stress_btc_sol_micro: args.stress_btc_sol_micro,
+        stress_btc_xrp_micro: args.stress_btc_xrp_micro,
+        stress_btc_hype_micro: args.stress_btc_hype_micro,
+        stress_eth_sol_micro: args.stress_eth_sol_micro,
+        stress_eth_xrp_micro: args.stress_eth_xrp_micro,
+        stress_eth_hype_micro: args.stress_eth_hype_micro,
+        stress_sol_xrp_micro: args.stress_sol_xrp_micro,
+        stress_sol_hype_micro: args.stress_sol_hype_micro,
+        stress_xrp_hype_micro: args.stress_xrp_hype_micro,
+        update_p5: args.update_p5,
+        update_stress: args.update_stress,
+    }, buffer);
+    const data = Buffer.concat([identifier, buffer]).slice(0, 8 + len);
+    const ix = new web3_js_1.TransactionInstruction({ keys, programId, data });
+    return ix;
+}
+//# sourceMappingURL=updateCrossAssetMatrix.js.map

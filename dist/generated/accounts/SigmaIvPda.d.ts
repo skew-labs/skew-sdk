@@ -1,0 +1,86 @@
+import { PublicKey, Connection } from "@solana/web3.js";
+import BN from "bn.js";
+export interface SigmaIvPdaFields {
+    btc_long: number;
+    btc_short: number;
+    eth_long: number;
+    eth_short: number;
+    sol_long: number;
+    sol_short: number;
+    last_update_long: BN;
+    last_update_short: BN;
+    authority: PublicKey;
+    bump: number;
+    jup_rv: number;
+    bonk_rv: number;
+    wif_rv: number;
+    sol_rv: number;
+    last_update_rv: BN;
+    btc_r_t: number;
+    eth_r_t: number;
+    sol_r_t: number;
+    last_update_r_t: BN;
+    xrp_long: number;
+    xrp_short: number;
+    hype_long: number;
+    hype_short: number;
+}
+export interface SigmaIvPdaJSON {
+    btc_long: number;
+    btc_short: number;
+    eth_long: number;
+    eth_short: number;
+    sol_long: number;
+    sol_short: number;
+    last_update_long: string;
+    last_update_short: string;
+    authority: string;
+    bump: number;
+    jup_rv: number;
+    bonk_rv: number;
+    wif_rv: number;
+    sol_rv: number;
+    last_update_rv: string;
+    btc_r_t: number;
+    eth_r_t: number;
+    sol_r_t: number;
+    last_update_r_t: string;
+    xrp_long: number;
+    xrp_short: number;
+    hype_long: number;
+    hype_short: number;
+}
+export declare class SigmaIvPda {
+    readonly btc_long: number;
+    readonly btc_short: number;
+    readonly eth_long: number;
+    readonly eth_short: number;
+    readonly sol_long: number;
+    readonly sol_short: number;
+    readonly last_update_long: BN;
+    readonly last_update_short: BN;
+    readonly authority: PublicKey;
+    readonly bump: number;
+    readonly jup_rv: number;
+    readonly bonk_rv: number;
+    readonly wif_rv: number;
+    readonly sol_rv: number;
+    readonly last_update_rv: BN;
+    readonly btc_r_t: number;
+    readonly eth_r_t: number;
+    readonly sol_r_t: number;
+    readonly last_update_r_t: BN;
+    readonly xrp_long: number;
+    readonly xrp_short: number;
+    readonly hype_long: number;
+    readonly hype_short: number;
+    static readonly discriminator: Buffer<ArrayBuffer>;
+    static readonly layout: any;
+    constructor(fields: SigmaIvPdaFields);
+    static fetch(c: Connection, address: PublicKey, programId?: PublicKey): Promise<SigmaIvPda | null>;
+    static fetchMultiple(c: Connection, addresses: PublicKey[], programId?: PublicKey): Promise<Array<SigmaIvPda | null>>;
+    static decode(data: Buffer): SigmaIvPda;
+    toJSON(): SigmaIvPdaJSON;
+    static fromJSON(obj: SigmaIvPdaJSON): SigmaIvPda;
+}
+//# sourceMappingURL=SigmaIvPda.d.ts.map

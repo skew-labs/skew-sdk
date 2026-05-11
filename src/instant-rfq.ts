@@ -1,11 +1,61 @@
-import { PublicKey, Transaction } from "@solana/web3.js";
+import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+
+type SignableTransaction = Transaction | VersionedTransaction;
 import { sha256 } from "@noble/hashes/sha256";
 import { JITOSOL_MINT, NATIVE_SOL_MINT } from "./pda";
+import type { RelayPayloadFields as GeneratedRelayPayloadFields } from "./generated/types/RelayPayload";
 
 export const INSTANT_RFQ_DEFAULT_RELAY_URL =
   "wss://skew-relay-devnet.fly.dev/subscribe";
+export const INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = 600;
+export const INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = 60_000;
+export const INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS = 120_000;
 
-export const RELAY_PAYLOAD_LEN = 100 as const;
+// Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding cutover. Bumped 100 → 132 B
+// to append the buyer Pubkey at offsets 100..132. Closes a relay-compromise
+// loophole where a stolen `cm_sig` could be reused against any buyer wallet.
+// The on-chain handler now binds `payload.buyer == ctx.accounts.buyer.key()`
+// and the digest covers the buyer pubkey too. v1 (100 B) clients hit
+// UnauthorizedRelayPayload (6068) on the first signed digest verify.
+export const RELAY_PAYLOAD_LEN = 132 as const;
+
+// Wave 1 cascade-failure root-cause #2 guard: the public, camelCase
+// `RelayPayload` interface below is the SDK's stable surface. The IDL-derived
+// `GeneratedRelayPayloadFields` (snake_case) is the canonical schema. This
+// type-level identity assertion guarantees both shapes describe the same
+// field set + value types — any drift between on-chain Borsh layout and the
+// SDK now fails `tsc`. The mapping below is the single place where a future
+// schema change forces an explicit human review.
+type _RelayPayloadCamelToSnake<T> = {
+  readonly [K in keyof T as K extends "relayNonce"
+    ? "relay_nonce"
+    : K extends "quoteExpiryTs"
+      ? "quote_expiry_ts"
+      : K extends "optionType"
+        ? "option_type"
+        : K extends "expiryTs"
+          ? "expiry_ts"
+          : K extends "payoffAmount"
+            ? "payoff_amount"
+            : K extends "settlementDecimals"
+              ? "settlement_decimals"
+              : K extends "upperBound"
+                ? "upper_bound"
+                : K extends "extraParam"
+                  ? "extra_param"
+                  : K extends "settlementMint"
+                    ? "settlement_mint"
+                    : K]: T[K];
+  // `buyer` (camelCase) maps to `buyer` (snake_case) — already identical, no rename needed.
+};
+type _RelayPayloadKeyParity =
+  keyof _RelayPayloadCamelToSnake<RelayPayload> extends keyof GeneratedRelayPayloadFields
+    ? keyof GeneratedRelayPayloadFields extends keyof _RelayPayloadCamelToSnake<RelayPayload>
+      ? true
+      : never
+    : never;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _relayPayloadKeyParityCheck: _RelayPayloadKeyParity = true;
 
 export class RfqWalletMessageSigningUnsupported extends Error {
   readonly code = "RFQ_WALLET_MESSAGE_SIGNING_UNSUPPORTED";
@@ -35,6 +85,11 @@ export interface RelayPayload {
   extraParam: number;
   premium: bigint;
   settlementMint: Uint8Array;
+  /** Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding (32 B at offsets
+   *  100..132). The on-chain handler asserts
+   *  `payload.buyer == ctx.accounts.buyer.key()` so a relay-compromised
+   *  cm_sig cannot be replayed against a different buyer Signer. */
+  buyer: Uint8Array;
 }
 
 export interface InstantRfqOptionSpec {
@@ -67,15 +122,24 @@ export interface InstantRfqHitResult {
   riskPreflight?: {
     status?: string;
     preImMicro?: bigint;
+    preImUsd?: number;
     postImMicro?: bigint;
+    postImUsd?: number;
     requiredDeltaMicro?: bigint;
+    requiredDeltaUsd?: number;
     freeCollateralMicro?: bigint;
+    freeCollateralUsd?: number;
     afterFillFreeMicro?: bigint;
+    afterFillFreeUsd?: number;
     healthBeforeBps?: bigint;
     healthAfterBps?: bigint;
     marginalImLockedMicro?: bigint;
+    marginalImLockedUsd?: number;
+    marginalImLockedPctOfNotional?: number;
     feeMicro?: bigint;
+    feeUsd?: number;
     premiumMicro?: bigint;
+    premiumUsd?: number;
     mmp?: string;
     positionAccounts?: number;
   };
@@ -115,15 +179,23 @@ export function buildRelayPayload(args: {
   settlementMint: PublicKey | Uint8Array;
   settlementDecimals?: number;
   quoteExpiryTs?: bigint;
+  /** Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding. Required: the buyer
+   *  wallet that will sign the atomic_fill_from_relay transaction. Bound
+   *  into the digest so a stolen cm_sig cannot replay against a different
+   *  buyer Signer. */
+  buyer: PublicKey | Uint8Array;
 }): RelayPayload {
   const now = BigInt(Math.floor(Date.now() / 1000));
   const mintBytes =
     args.settlementMint instanceof PublicKey
       ? args.settlementMint.toBytes()
       : args.settlementMint;
+  const buyerBytes =
+    args.buyer instanceof PublicKey ? args.buyer.toBytes() : args.buyer;
   const payload = {
     relayNonce: args.relayNonce,
-    quoteExpiryTs: args.quoteExpiryTs ?? now + 30n,
+    quoteExpiryTs:
+      args.quoteExpiryTs ?? now + BigInt(INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS),
     optionType: args.optionSpec.optionType,
     asset: args.optionSpec.asset,
     direction: args.optionSpec.direction,
@@ -135,6 +207,7 @@ export function buildRelayPayload(args: {
     extraParam: args.optionSpec.extraParam ?? 0,
     premium: args.premiumMicro,
     settlementMint: mintBytes,
+    buyer: buyerBytes,
   };
   validateInstantRfqLane(payload);
   return payload;
@@ -145,6 +218,9 @@ export function encodeRelayPayload(payload: RelayPayload): Uint8Array {
     throw new Error(
       `settlementMint must be 32 bytes, got ${payload.settlementMint.length}`,
     );
+  }
+  if (payload.buyer.length !== 32) {
+    throw new Error(`buyer must be 32 bytes, got ${payload.buyer.length}`);
   }
   const buf = new ArrayBuffer(RELAY_PAYLOAD_LEN);
   const view = new DataView(buf);
@@ -162,6 +238,8 @@ export function encodeRelayPayload(payload: RelayPayload): Uint8Array {
   view.setBigUint64(60, payload.premium, true);
   const out = new Uint8Array(buf);
   out.set(payload.settlementMint, 68);
+  // Phase 7-H · F3.1 (2026-05-09) — v2 buyer at offsets 100..132.
+  out.set(payload.buyer, 100);
   return out;
 }
 
@@ -197,6 +275,11 @@ export function relayPayloadToJson(payload: RelayPayload): Record<string, unknow
     extra_param: payload.extraParam,
     premium: payload.premium.toString(),
     settlement_mint: Array.from(payload.settlementMint),
+    // Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding. The relay overwrites
+    // this server-side from the authenticated session pubkey before signing
+    // the digest, but we serialize what the SDK has so the wire shape stays
+    // canonical.
+    buyer: Array.from(payload.buyer),
   };
 }
 
@@ -208,7 +291,7 @@ export async function collectInstantRfqQuotes(args: {
   maxQuotes?: number;
 }): Promise<{ relayNonce: bigint; quotes: InstantRfqQuote[] }> {
   const relayUrl = args.relayUrl ?? INSTANT_RFQ_DEFAULT_RELAY_URL;
-  const timeoutMs = args.timeoutMs ?? 2_500;
+  const timeoutMs = args.timeoutMs ?? INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS;
   const maxQuotes = args.maxQuotes ?? 8;
 
   return new Promise((resolve, reject) => {
@@ -291,7 +374,7 @@ type InstantRfqHitBaseArgs = {
   buyer: PublicKey;
   cmPubkey: PublicKey;
   payload: RelayPayload;
-  signTransaction: (transaction: Transaction) => Promise<Transaction>;
+  signTransaction: <T extends SignableTransaction>(transaction: T) => Promise<T>;
   relayUrl?: string;
   timeoutMs?: number;
 };
@@ -347,7 +430,7 @@ async function hitInstantRfqQuoteInternal(args: InstantRfqHitBaseArgs & {
   buyerSig?: Uint8Array;
 }): Promise<InstantRfqHitResult> {
   const relayUrl = args.relayUrl ?? INSTANT_RFQ_DEFAULT_RELAY_URL;
-  const timeoutMs = args.timeoutMs ?? 30_000;
+  const timeoutMs = args.timeoutMs ?? INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS;
   validateInstantRfqLane(args.payload);
 
   return new Promise((resolve, reject) => {
@@ -438,24 +521,50 @@ async function hitInstantRfqQuoteInternal(args: InstantRfqHitBaseArgs & {
               const rp = msg.risk_preflight as Record<string, unknown>;
               const maybeBigInt = (v: unknown): bigint | undefined =>
                 v === undefined || v === null ? undefined : BigInt(String(v));
+              const preImMicro = maybeBigInt(rp.pre_im_micro);
+              const postImMicro = maybeBigInt(rp.post_im_micro);
+              const requiredDeltaMicro = maybeBigInt(rp.required_delta_micro);
+              const freeCollateralMicro = maybeBigInt(rp.free_collateral_micro);
+              const afterFillFreeMicro = maybeBigInt(rp.after_fill_free_micro);
+              const marginalImLockedMicro = maybeBigInt(rp.marginal_im_locked_micro);
+              const feeMicro = maybeBigInt(rp.fee_micro);
+              const premiumMicro = maybeBigInt(rp.premium_micro);
               riskPreflight = {
                 status: typeof rp.status === "string" ? rp.status : undefined,
-                preImMicro: maybeBigInt(rp.pre_im_micro),
-                postImMicro: maybeBigInt(rp.post_im_micro),
-                requiredDeltaMicro: maybeBigInt(rp.required_delta_micro),
-                freeCollateralMicro: maybeBigInt(rp.free_collateral_micro),
-                afterFillFreeMicro: maybeBigInt(rp.after_fill_free_micro),
+                preImMicro,
+                preImUsd: microToUsd(preImMicro),
+                postImMicro,
+                postImUsd: microToUsd(postImMicro),
+                requiredDeltaMicro,
+                requiredDeltaUsd: microToUsd(requiredDeltaMicro),
+                freeCollateralMicro,
+                freeCollateralUsd: microToUsd(freeCollateralMicro),
+                afterFillFreeMicro,
+                afterFillFreeUsd: microToUsd(afterFillFreeMicro),
                 healthBeforeBps: maybeBigInt(rp.health_before_bps),
                 healthAfterBps: maybeBigInt(rp.health_after_bps),
-                marginalImLockedMicro: maybeBigInt(rp.marginal_im_locked_micro),
-                feeMicro: maybeBigInt(rp.fee_micro),
-                premiumMicro: maybeBigInt(rp.premium_micro),
+                marginalImLockedMicro,
+                marginalImLockedUsd: microToUsd(marginalImLockedMicro),
+                marginalImLockedPctOfNotional: microPercentOf(
+                  marginalImLockedMicro,
+                  args.payload.payoffAmount,
+                ),
+                feeMicro,
+                feeUsd: microToUsd(feeMicro),
+                premiumMicro,
+                premiumUsd: microToUsd(premiumMicro),
                 mmp: typeof rp.mmp === "string" ? rp.mmp : undefined,
                 positionAccounts:
                   typeof rp.position_accounts === "number" ? rp.position_accounts : undefined,
               };
             }
-            const tx = Transaction.from(base64ToBytes(txB64));
+            const txBytes = base64ToBytes(txB64);
+            let tx: SignableTransaction;
+            try {
+              tx = VersionedTransaction.deserialize(txBytes);
+            } catch {
+              tx = Transaction.from(txBytes);
+            }
             const signed = await args.signTransaction(tx);
             ws.send(JSON.stringify({
               kind: "buyer_tx_signed",
@@ -491,6 +600,15 @@ function bytesToBase64(bytes: Uint8Array): string {
   let s = "";
   for (const b of bytes) s += String.fromCharCode(b);
   return btoa(s);
+}
+
+function microToUsd(value: bigint | undefined): number | undefined {
+  return value === undefined ? undefined : Number(value) / 1_000_000;
+}
+
+function microPercentOf(value: bigint | undefined, denominator: bigint | undefined): number | undefined {
+  if (value === undefined || denominator === undefined || denominator <= 0n) return undefined;
+  return Number(value) / Number(denominator) * 100;
 }
 
 function base64ToBytes(s: string): Uint8Array {

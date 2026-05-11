@@ -1,0 +1,86 @@
+import { PublicKey, Connection } from "@solana/web3.js";
+import BN from "bn.js";
+export interface MakerAxeFields {
+    mm: PublicKey;
+    axe_id: BN;
+    asset: number;
+    side: number;
+    option_type_mask: number;
+    _pad_0: Array<number>;
+    strike_band_lo: BN;
+    strike_band_hi: BN;
+    expiry_band_lo: BN;
+    expiry_band_hi: BN;
+    size_micro: BN;
+    bid_premium_band_lo: BN;
+    bid_premium_band_hi: BN;
+    ask_premium_band_lo: BN;
+    ask_premium_band_hi: BN;
+    valid_until: BN;
+    note_hash: Array<number>;
+    revoked: boolean;
+    bump: number;
+    _pad_1: Array<number>;
+    created_at: BN;
+    version_slot: BN;
+    _reserved: Array<number>;
+}
+export interface MakerAxeJSON {
+    mm: string;
+    axe_id: string;
+    asset: number;
+    side: number;
+    option_type_mask: number;
+    _pad_0: Array<number>;
+    strike_band_lo: string;
+    strike_band_hi: string;
+    expiry_band_lo: string;
+    expiry_band_hi: string;
+    size_micro: string;
+    bid_premium_band_lo: string;
+    bid_premium_band_hi: string;
+    ask_premium_band_lo: string;
+    ask_premium_band_hi: string;
+    valid_until: string;
+    note_hash: Array<number>;
+    revoked: boolean;
+    bump: number;
+    _pad_1: Array<number>;
+    created_at: string;
+    version_slot: string;
+    _reserved: Array<number>;
+}
+export declare class MakerAxe {
+    readonly mm: PublicKey;
+    readonly axe_id: BN;
+    readonly asset: number;
+    readonly side: number;
+    readonly option_type_mask: number;
+    readonly _pad_0: Array<number>;
+    readonly strike_band_lo: BN;
+    readonly strike_band_hi: BN;
+    readonly expiry_band_lo: BN;
+    readonly expiry_band_hi: BN;
+    readonly size_micro: BN;
+    readonly bid_premium_band_lo: BN;
+    readonly bid_premium_band_hi: BN;
+    readonly ask_premium_band_lo: BN;
+    readonly ask_premium_band_hi: BN;
+    readonly valid_until: BN;
+    readonly note_hash: Array<number>;
+    readonly revoked: boolean;
+    readonly bump: number;
+    readonly _pad_1: Array<number>;
+    readonly created_at: BN;
+    readonly version_slot: BN;
+    readonly _reserved: Array<number>;
+    static readonly discriminator: Buffer<ArrayBuffer>;
+    static readonly layout: any;
+    constructor(fields: MakerAxeFields);
+    static fetch(c: Connection, address: PublicKey, programId?: PublicKey): Promise<MakerAxe | null>;
+    static fetchMultiple(c: Connection, addresses: PublicKey[], programId?: PublicKey): Promise<Array<MakerAxe | null>>;
+    static decode(data: Buffer): MakerAxe;
+    toJSON(): MakerAxeJSON;
+    static fromJSON(obj: MakerAxeJSON): MakerAxe;
+}
+//# sourceMappingURL=MakerAxe.d.ts.map

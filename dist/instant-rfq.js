@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.RfqWalletMessageSigningUnsupported = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = void 0;
+exports.RfqWalletMessageSigningUnsupported = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS = exports.INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = exports.INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = void 0;
 exports.validateInstantRfqLane = validateInstantRfqLane;
 exports.buildRelayPayload = buildRelayPayload;
 exports.encodeRelayPayload = encodeRelayPayload;
@@ -13,7 +13,18 @@ const web3_js_1 = require("@solana/web3.js");
 const sha256_1 = require("@noble/hashes/sha256");
 const pda_1 = require("./pda");
 exports.INSTANT_RFQ_DEFAULT_RELAY_URL = "wss://skew-relay-devnet.fly.dev/subscribe";
-exports.RELAY_PAYLOAD_LEN = 100;
+exports.INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = 600;
+exports.INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = 60000;
+exports.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS = 120000;
+// Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding cutover. Bumped 100 → 132 B
+// to append the buyer Pubkey at offsets 100..132. Closes a relay-compromise
+// loophole where a stolen `cm_sig` could be reused against any buyer wallet.
+// The on-chain handler now binds `payload.buyer == ctx.accounts.buyer.key()`
+// and the digest covers the buyer pubkey too. v1 (100 B) clients hit
+// UnauthorizedRelayPayload (6068) on the first signed digest verify.
+exports.RELAY_PAYLOAD_LEN = 132;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _relayPayloadKeyParityCheck = true;
 class RfqWalletMessageSigningUnsupported extends Error {
     constructor(cause) {
         super("This wallet cannot sign arbitrary Solana messages for Instant RFQ. Use hitInstantRfqQuoteTxSigned, which only requires a normal transaction signature.");
@@ -53,9 +64,10 @@ function buildRelayPayload(args) {
     const mintBytes = args.settlementMint instanceof web3_js_1.PublicKey
         ? args.settlementMint.toBytes()
         : args.settlementMint;
+    const buyerBytes = args.buyer instanceof web3_js_1.PublicKey ? args.buyer.toBytes() : args.buyer;
     const payload = {
         relayNonce: args.relayNonce,
-        quoteExpiryTs: args.quoteExpiryTs ?? now + 30n,
+        quoteExpiryTs: args.quoteExpiryTs ?? now + BigInt(exports.INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS),
         optionType: args.optionSpec.optionType,
         asset: args.optionSpec.asset,
         direction: args.optionSpec.direction,
@@ -67,6 +79,7 @@ function buildRelayPayload(args) {
         extraParam: args.optionSpec.extraParam ?? 0,
         premium: args.premiumMicro,
         settlementMint: mintBytes,
+        buyer: buyerBytes,
     };
     validateInstantRfqLane(payload);
     return payload;
@@ -74,6 +87,9 @@ function buildRelayPayload(args) {
 function encodeRelayPayload(payload) {
     if (payload.settlementMint.length !== 32) {
         throw new Error(`settlementMint must be 32 bytes, got ${payload.settlementMint.length}`);
+    }
+    if (payload.buyer.length !== 32) {
+        throw new Error(`buyer must be 32 bytes, got ${payload.buyer.length}`);
     }
     const buf = new ArrayBuffer(exports.RELAY_PAYLOAD_LEN);
     const view = new DataView(buf);
@@ -91,6 +107,8 @@ function encodeRelayPayload(payload) {
     view.setBigUint64(60, payload.premium, true);
     const out = new Uint8Array(buf);
     out.set(payload.settlementMint, 68);
+    // Phase 7-H · F3.1 (2026-05-09) — v2 buyer at offsets 100..132.
+    out.set(payload.buyer, 100);
     return out;
 }
 function relayPayloadDigest(payloadOrBytes) {
@@ -122,11 +140,16 @@ function relayPayloadToJson(payload) {
         extra_param: payload.extraParam,
         premium: payload.premium.toString(),
         settlement_mint: Array.from(payload.settlementMint),
+        // Phase 7-H · F3.1 (2026-05-09) — v2 buyer-binding. The relay overwrites
+        // this server-side from the authenticated session pubkey before signing
+        // the digest, but we serialize what the SDK has so the wire shape stays
+        // canonical.
+        buyer: Array.from(payload.buyer),
     };
 }
 async function collectInstantRfqQuotes(args) {
     const relayUrl = args.relayUrl ?? exports.INSTANT_RFQ_DEFAULT_RELAY_URL;
-    const timeoutMs = args.timeoutMs ?? 2500;
+    const timeoutMs = args.timeoutMs ?? exports.INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS;
     const maxQuotes = args.maxQuotes ?? 8;
     return new Promise((resolve, reject) => {
         const ws = new WebSocket(relayUrl);
@@ -246,7 +269,7 @@ async function hitInstantRfqQuote(args) {
 }
 async function hitInstantRfqQuoteInternal(args) {
     const relayUrl = args.relayUrl ?? exports.INSTANT_RFQ_DEFAULT_RELAY_URL;
-    const timeoutMs = args.timeoutMs ?? 30000;
+    const timeoutMs = args.timeoutMs ?? exports.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS;
     validateInstantRfqLane(args.payload);
     return new Promise((resolve, reject) => {
         const ws = new WebSocket(relayUrl);
@@ -335,23 +358,47 @@ async function hitInstantRfqQuoteInternal(args) {
                         if (typeof msg.risk_preflight === "object" && msg.risk_preflight !== null) {
                             const rp = msg.risk_preflight;
                             const maybeBigInt = (v) => v === undefined || v === null ? undefined : BigInt(String(v));
+                            const preImMicro = maybeBigInt(rp.pre_im_micro);
+                            const postImMicro = maybeBigInt(rp.post_im_micro);
+                            const requiredDeltaMicro = maybeBigInt(rp.required_delta_micro);
+                            const freeCollateralMicro = maybeBigInt(rp.free_collateral_micro);
+                            const afterFillFreeMicro = maybeBigInt(rp.after_fill_free_micro);
+                            const marginalImLockedMicro = maybeBigInt(rp.marginal_im_locked_micro);
+                            const feeMicro = maybeBigInt(rp.fee_micro);
+                            const premiumMicro = maybeBigInt(rp.premium_micro);
                             riskPreflight = {
                                 status: typeof rp.status === "string" ? rp.status : undefined,
-                                preImMicro: maybeBigInt(rp.pre_im_micro),
-                                postImMicro: maybeBigInt(rp.post_im_micro),
-                                requiredDeltaMicro: maybeBigInt(rp.required_delta_micro),
-                                freeCollateralMicro: maybeBigInt(rp.free_collateral_micro),
-                                afterFillFreeMicro: maybeBigInt(rp.after_fill_free_micro),
+                                preImMicro,
+                                preImUsd: microToUsd(preImMicro),
+                                postImMicro,
+                                postImUsd: microToUsd(postImMicro),
+                                requiredDeltaMicro,
+                                requiredDeltaUsd: microToUsd(requiredDeltaMicro),
+                                freeCollateralMicro,
+                                freeCollateralUsd: microToUsd(freeCollateralMicro),
+                                afterFillFreeMicro,
+                                afterFillFreeUsd: microToUsd(afterFillFreeMicro),
                                 healthBeforeBps: maybeBigInt(rp.health_before_bps),
                                 healthAfterBps: maybeBigInt(rp.health_after_bps),
-                                marginalImLockedMicro: maybeBigInt(rp.marginal_im_locked_micro),
-                                feeMicro: maybeBigInt(rp.fee_micro),
-                                premiumMicro: maybeBigInt(rp.premium_micro),
+                                marginalImLockedMicro,
+                                marginalImLockedUsd: microToUsd(marginalImLockedMicro),
+                                marginalImLockedPctOfNotional: microPercentOf(marginalImLockedMicro, args.payload.payoffAmount),
+                                feeMicro,
+                                feeUsd: microToUsd(feeMicro),
+                                premiumMicro,
+                                premiumUsd: microToUsd(premiumMicro),
                                 mmp: typeof rp.mmp === "string" ? rp.mmp : undefined,
                                 positionAccounts: typeof rp.position_accounts === "number" ? rp.position_accounts : undefined,
                             };
                         }
-                        const tx = web3_js_1.Transaction.from(base64ToBytes(txB64));
+                        const txBytes = base64ToBytes(txB64);
+                        let tx;
+                        try {
+                            tx = web3_js_1.VersionedTransaction.deserialize(txBytes);
+                        }
+                        catch {
+                            tx = web3_js_1.Transaction.from(txBytes);
+                        }
                         const signed = await args.signTransaction(tx);
                         ws.send(JSON.stringify({
                             kind: "buyer_tx_signed",
@@ -386,6 +433,14 @@ function bytesToBase64(bytes) {
     for (const b of bytes)
         s += String.fromCharCode(b);
     return btoa(s);
+}
+function microToUsd(value) {
+    return value === undefined ? undefined : Number(value) / 1000000;
+}
+function microPercentOf(value, denominator) {
+    if (value === undefined || denominator === undefined || denominator <= 0n)
+        return undefined;
+    return Number(value) / Number(denominator) * 100;
 }
 function base64ToBytes(s) {
     if (typeof Buffer !== "undefined") {

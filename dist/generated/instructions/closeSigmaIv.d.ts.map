@@ -1,0 +1,1 @@
+{"version":3,"file":"closeSigmaIv.d.ts","sourceRoot":"","sources":["../../../src/generated/instructions/closeSigmaIv.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,sBAAsB,EAAE,SAAS,EAAe,MAAM,iBAAiB,CAAA;AAMhF,MAAM,WAAW,oBAAoB;IACnC,YAAY,EAAE,SAAS,CAAA;IACvB,SAAS,EAAE,SAAS,CAAA;CACrB;AAED,wBAAgB,YAAY,CAC1B,QAAQ,EAAE,oBAAoB,EAC9B,SAAS,GAAE,SAAsB,0BAUlC"}

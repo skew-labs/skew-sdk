@@ -171,6 +171,10 @@ export declare function findCmEscrowPda(cmPda: PublicKey, programId?: PublicKey)
  * Seeds: [b"position_registry", authority]
  */
 export declare function findPositionRegistryPda(authority: PublicKey, programId?: PublicKey): [PublicKey, number];
+/** Hybrid PM cache sidecar. Seeds: [b"cm_risk_cache", authority]. */
+export declare function findCmRiskCachePda(authority: PublicKey, programId?: PublicKey): [PublicKey, number];
+/** Per-option PM contribution cache sidecar. Seeds: [b"option_risk_cache", option]. */
+export declare function findOptionRiskCachePda(optionPda: PublicKey, programId?: PublicKey): [PublicKey, number];
 /** Singleton settlement/collateral mint allowlist PDA. */
 export declare function findCollateralPolicyPda(programId?: PublicKey): [PublicKey, number];
 /**
@@ -303,6 +307,10 @@ export declare function findComboEscrowPda(comboIntentPda: PublicKey, programId?
  * Seeds: [b"cond_order", authority, order_id_le]
  */
 export declare function findConditionalOrderPda(authority: PublicKey, orderId: bigint, programId?: PublicKey): [PublicKey, number];
+/** Legacy single-MM RFQ PDA. Seeds: [b"rfq", buyer, nonce_le]. */
+export declare function findLegacyRfqPda(buyer: PublicKey, nonce: bigint, programId?: PublicKey): [PublicKey, number];
+/** Legacy RFQ escrow ATA PDA. Seeds: [b"rfq_escrow", rfq]. */
+export declare function findLegacyRfqEscrowPda(rfq: PublicKey, programId?: PublicKey): [PublicKey, number];
 /**
  * RfqAuctionPda — per-(buyer, auction_id) RFQ auction. Buyer escrows
  * `max_premium_micro` USDC at register time; finalize/cancel refunds the

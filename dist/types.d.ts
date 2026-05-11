@@ -167,6 +167,23 @@ export interface BuyParams {
 }
 export interface BuyResult {
     txSignature: string;
+    option?: OptionSummary;
+    optionAddress?: string;
+    optionTokenMint?: string;
+    buyerOptionAta?: string;
+    buyerOptionAmount?: string;
+    buyer?: string;
+    creator?: string;
+    holder?: string;
+}
+export interface BuyFromRfqAuctionResult extends BuyResult {
+    auction: string;
+    buyer: string;
+    maker: string;
+    quoteMm: string;
+    premiumMicro: bigint;
+    premiumUsd: number;
+    verifiedTerms: boolean;
 }
 export interface SettleResult {
     txSignature: string;
@@ -192,8 +209,30 @@ export interface RegisterCmResult {
     cmEscrow: PublicKey;
     /** Per-CM PositionRegistry PDA initialized in the same onboarding tx. */
     positionRegistry: PublicKey;
-    /** register_clearing_member + init_position_registry transaction signature. */
+    /**
+     * register_clearing_member + init_position_registry transaction signature.
+     *
+     * Phase 7-B (F1.4 idempotent fix): when the CM PDA was already registered
+     * before this call (double-click, page refresh, two-tab race) the SDK
+     * short-circuits the on-chain submit and returns the literal sentinel
+     * `"idempotent_already_registered"` here together with `alreadyRegistered:
+     * true`. Callers that key off the signature for an explorer link should
+     * branch on `alreadyRegistered` instead of pattern-matching this string.
+     */
     txSignature: string;
+    /**
+     * Phase 7-B (F1.4): `true` when the function detected an already-registered
+     * CM (either via pre-fetch or by recovering from an `AccountAlreadyInUse`
+     * race) and returned without submitting a duplicate transaction.
+     */
+    alreadyRegistered: boolean;
+    /**
+     * Phase 7-B (F1.1): the user-side ATAs that the SDK created on the caller's
+     * behalf inside this onboarding transaction. Currently the only candidate
+     * is the authority's USDC ATA; the array is empty when every required ATA
+     * already existed before the call.
+     */
+    atasCreated: PublicKey[];
 }
 /** Result of any single-tx mutation (transfer, cancel, close, collateral). */
 export interface TxResult {
@@ -226,12 +265,18 @@ export interface CollateralPolicySnapshot {
  * PDAs (RFQ / CM / PoVS / governance) are never returned.
  */
 export interface ListOptionsOpts {
+    /** Fetch one option PDA directly instead of scanning the inventory. */
+    pda?: string | PublicKey;
     /** Filter by launch-panel underlying. */
     underlying?: Underlying;
     /** Filter by anchor `OptionType` storage variant. */
     optionType?: OptionType;
     /** Filter by anchor `OptionState`. Default: no filter (all states). */
     state?: OptionState;
+    /** Filter by current option holder. Accepts a base58 pubkey or PublicKey. */
+    holder?: string | PublicKey;
+    /** Filter by option creator / writer. Accepts a base58 pubkey or PublicKey. */
+    creator?: string | PublicKey;
     /** Max items returned. Default 100. Hard cap 500 to keep JSON payloads bounded. */
     limit?: number;
     /**
@@ -251,6 +296,8 @@ export interface ListOptionsOpts {
 export interface OptionSummary {
     /** Option PDA address (base58). */
     pda: string;
+    /** SPL token mint PDA representing holder ownership of this option. */
+    optionTokenMint: string;
     /** Writer (CM authority) that sized + collateralised the option. */
     creator: string;
     /** Current holder of the option token. Equals `creator` until first buy. */
@@ -273,6 +320,10 @@ export interface OptionSummary {
     upperBoundUsd: number;
     /** Upper bound at on-chain precision (USD × 10^8). */
     upperBoundOnChain: bigint;
+    /** Raw on-chain extra_param field. CappedVanilla stores cap strike here. */
+    extraParam: number;
+    /** CappedVanilla cap strike in USD, otherwise 0. */
+    extraParamUsd: number;
     /** Expiry as unix seconds. */
     expiryTs: number;
     /** Max payoff (notional) in USD. */
@@ -299,6 +350,211 @@ export interface OptionSummary {
     underlyingFeedId: string;
     /** Settlement SPL mint (base58) — typically devnet USDC. */
     settlementMint: string;
+    /** Settlement mint decimals stored on the option account. */
+    settlementDecimals: number;
+    /** Metaplex metadata PDA stored by `register_option_metadata`, or default pubkey if pending. */
+    metadata: string;
+    /** Metadata readback status. `pending` means option/token exists but lazy metadata registration has not landed yet. */
+    metadataStatus: "pending" | "registered";
+    /** Final settlement price raw value (Pyth price scale × 10^8), 0 before settlement. */
+    settledPriceRaw: bigint;
+    /** Final settlement price in USD, null before settlement. */
+    settledPriceUsd: number | null;
+    /** Settlement unix timestamp, null before settlement. */
+    settledAt: number | null;
+}
+export interface ListRfqAuctionsOpts {
+    /** API base URL. Defaults to SKEW_WEB_URL or https://skew-web.vercel.app. */
+    webUrl?: string;
+    /** Buyer pubkey filter. */
+    buyer?: string | PublicKey;
+    /** Asset symbol filter. */
+    asset?: Underlying;
+    /** Only return auctions with a live best quote. */
+    withQuote?: boolean;
+    /** Max rows returned. Default 50, hard capped by the API. */
+    limit?: number;
+    /** Data source override. Default API behavior is indexer plus bounded fallback. */
+    source?: "indexer" | "onchain";
+}
+export interface RfqAuctionIndexQuote {
+    auction: string;
+    mm: string;
+    premium_micro: number | string;
+    valid_until_slot: number | string;
+    posted_slot: number | string;
+}
+export interface RfqAuctionIndexRow {
+    auction: string;
+    auction_id: number | string;
+    buyer: string;
+    asset: number;
+    strike_micro: number | string;
+    expiry_ts: number | string;
+    option_type: number;
+    direction?: number | null;
+    upper_bound?: number | string | null;
+    payoff_amount_micro: number | string;
+    max_premium_micro: number | string;
+    auction_open_slot: number | string;
+    auction_close_slot: number | string;
+    registered_at: number | string;
+    settlement_mint: string | null;
+    strategy_id?: string | null;
+    strategy_template?: string | null;
+    state?: number | string | null;
+    best_quote?: RfqAuctionIndexQuote | null;
+}
+export interface RfqAuctionIndexResponse {
+    auctions: RfqAuctionIndexRow[];
+    degraded: boolean;
+    source: string;
+    currentSlot: number | null;
+    detail?: string;
+}
+export interface RfqQuoteTapeRow {
+    mm: string;
+    premium_usdc: number;
+    valid_until_slot: number;
+    posted_slot: number;
+    tier: "firm" | "indicative";
+    tx_sig?: string | null;
+    observed_at?: string | null;
+    valid_until_unix?: number;
+    posted_at_unix?: number;
+    source?: "indexer" | "onchain_snapshot";
+}
+export interface RfqQuoteTapeResponse {
+    auction: string;
+    count: number;
+    firm_count: number;
+    indicative_count: number;
+    best_premium_usdc: number | null;
+    worst_premium_usdc: number | null;
+    spread_usdc: number;
+    unique_mms: number;
+    quotes: RfqQuoteTapeRow[];
+    currentSlot: number | null;
+    degraded: boolean;
+    source: string;
+    detail?: string;
+}
+export interface CreateFromRfqAuctionResult {
+    auction: string;
+    buyer: string;
+    maker: string;
+    quoteMm: string;
+    premiumMicro: bigint;
+    premiumUsd: number;
+    option: string;
+    optionTokenMint?: string;
+    createTx: string;
+    depositTx: string;
+    simulated?: boolean;
+    simulation?: TxSimulationResult;
+    createParams: CreateParams;
+}
+export interface PortfolioSnapshot {
+    owner: string;
+    longOptions: OptionSummary[];
+    shortOptions: OptionSummary[];
+    options: OptionSummary[];
+    clearingMember: ClearingMemberSnapshot | null;
+}
+export interface ListSecondaryListingsOpts {
+    /** API base URL. Defaults to SKEW_WEB_URL or https://skew-web.vercel.app. */
+    webUrl?: string;
+    asset?: Underlying;
+    active?: boolean;
+    pending?: boolean;
+    seller?: string | PublicKey;
+    optionPda?: string | PublicKey;
+    minQty?: number;
+    maxAsk?: number;
+    excludeMe?: string | PublicKey;
+    limit?: number;
+}
+export interface SecondaryListingOptionSummary {
+    asset?: string | null;
+    strike_usd?: number | string | null;
+    expiry_ts?: number | string | null;
+    option_type?: string | number | null;
+    direction?: number | string | null;
+    status?: string | null;
+}
+export interface SecondaryListingIndexRow {
+    id: string;
+    option_pda: string;
+    option_token_mint: string;
+    seller: string;
+    seller_handle?: string | null;
+    ask_price_usdc: number | string;
+    token_amount: number | string;
+    status: string;
+    listing_expires_at: string;
+    created_at: string;
+    tx_sig?: string | null;
+    option?: SecondaryListingOptionSummary | null;
+}
+export interface SecondaryListingIndexResponse {
+    listings: SecondaryListingIndexRow[];
+    count: number;
+    source?: string;
+    provisioned?: boolean;
+    detail?: string;
+}
+export interface CreateSecondaryListingArgs {
+    /** API base URL. Defaults to SKEW_WEB_URL or https://skew-web.vercel.app. */
+    webUrl?: string;
+    /** Option PDA being offered on the discovery tape. */
+    optionPda: string | PublicKey;
+    /** Option SPL mint. If omitted, the SDK derives it from optionPda. */
+    optionTokenMint?: string | PublicKey;
+    /** Total ask in USDC for tokenAmount option tokens. */
+    askPriceUsdc: number;
+    /** Option token amount offered. Current option mints are usually supply=1. */
+    tokenAmount?: number;
+    /** Listing TTL. Default 24 hours, max 720 hours. */
+    durationHours?: number;
+    /** Optional public label displayed by discovery surfaces. */
+    sellerHandle?: string | null;
+}
+export interface CreateSecondaryListingResult {
+    success: boolean;
+    listing: {
+        id: string;
+        created_at: string;
+        listing_expires_at: string;
+    };
+    option_pda: string;
+    option_token_mint: string;
+    seller: string;
+    ask_price_usdc: number;
+    token_amount: number;
+    holder_verified?: boolean;
+    option_readback?: OptionSummary | null;
+}
+export interface BuySecondaryListingArgs {
+    /** API base URL. Defaults to SKEW_WEB_URL or https://skew-web.vercel.app. */
+    webUrl?: string;
+    /** Secondary listing row id. */
+    listingId: string;
+    /** Optional seller wallet guard. If supplied, it must match the live listing row. */
+    seller?: string | PublicKey;
+    /** Optional total ask guard. If supplied, it must match the live listing row. */
+    askPriceUsdc?: number;
+    /** Optional option PDA guard. If supplied, it must match the live listing row. */
+    optionPda?: string | PublicKey;
+}
+export interface BuySecondaryListingResult {
+    success: boolean;
+    listing_id: string;
+    option_pda: string;
+    seller: string;
+    buyer: string;
+    payment_tx_sig: string;
+    next_step: string;
+    listing_readback?: SecondaryListingIndexRow;
 }
 /**
  * Read-only result of `calculate_margin`. Mirrors anchor `MarginCalcResult`
@@ -317,6 +573,49 @@ export interface MarginCalcResult {
     imLockedUsdcMicro: bigint;
     /** Withdrawable free collateral = collateral - tier_lockup - total_pm_locked, USDC × 10^6. */
     freeCollateralUsdcMicro: bigint;
+}
+export type PmCacheMode = "CACHE" | "FULL" | "BLOCKED";
+export interface PmCacheSnapshot {
+    pda: PublicKey;
+    initialized: boolean;
+    cm: PublicKey | null;
+    authority: PublicKey;
+    registryHash: string | null;
+    registryCount: number;
+    dirty: boolean;
+    dirtyReason: number;
+    modelVersion: number;
+    snapshotSlot: bigint;
+    snapshotTs: bigint;
+    cachedImMicro: bigint;
+    cachedMmMicro: bigint;
+    freeCollateralMicro: bigint;
+    baseImMicro: bigint;
+    scanRiskMicro: bigint;
+    boundaryMicro: bigint;
+    tailAddonMicro: bigint;
+    iccCreditMicro: bigint;
+    wrongWayAddonMicro: bigint;
+    yieldRhoAddonMicro: bigint;
+    cacheAgeSlots: bigint | null;
+}
+export interface IncrementalMarginPreview {
+    mode: PmCacheMode;
+    preImMicro: bigint;
+    postImMicro: bigint;
+    deltaImMicro: bigint;
+    freeCollateralMicro: bigint;
+    afterFillFreeMicro: bigint;
+    cacheAgeSlots: bigint | null;
+    reason?: string;
+}
+export type RentReclaimKind = "legacy_rfq" | "rfq_auction" | "rfq_maker_registry" | "combo_v2" | "option_collateral_lock";
+export interface RentReclaimableItem {
+    kind: RentReclaimKind;
+    pda: PublicKey;
+    refundTarget: PublicKey;
+    reason: string;
+    blockers: string[];
 }
 /**
  * Decoded snapshot of an `IsolatedVault` PDA. Per (user, option). All
@@ -621,7 +920,7 @@ export interface ClearingMemberSnapshot {
     positionsCount: number;
     /** Most recent calculate_margin / atomic_fill snapshot of portfolio IM. */
     lastImMicro: bigint;
-    /** Active Verified tier (0=Standard, 1=Silver, 2=Gold, 3=Platinum). */
+    /** Active clearing-class compatibility rank (0=M0, 1=M1, 2=M2, 3=M3). */
     tier: 0 | 1 | 2 | 3;
     /** Earliest unix ts at which a downgrade is permitted. */
     tierLockedUntil: bigint;
@@ -641,7 +940,7 @@ export interface LstVaultSnapshot {
     lstQty: bigint;
     /** LST quantity pledged against open option fills (lamports). */
     lockedQty: bigint;
-    /** LST quantity pledged as Verified-tier lockup floor (lamports). */
+    /** LST quantity pledged as clearing-class lockup floor (lamports). */
     tierLockedQty: bigint;
     /** Solana slot of the most recent stake-pool ER refresh. */
     lastErUpdateSlot: bigint;
@@ -650,9 +949,9 @@ export interface LstVaultSnapshot {
 }
 /**
  * Decoded snapshot of a per-user `NativeSolVault` PDA (Phase 1A.2 2026-05-04).
- * No mint dimension (single wSOL mint per protocol). No tier_locked slot —
- * Verified-tier lockup is jitoSOL-only by design (yield-bearing collateral
- * is the value proposition for the tier lockup).
+ * No mint dimension (single wSOL mint per protocol). No class-lockup slot:
+ * class lockup is jitoSOL-only by design because yield-bearing collateral is
+ * the value proposition for that lock.
  *
  * Layout: 65 B (8 disc + 32 user + 8 sol_qty + 8 locked_qty + 8 last_update_slot + 1 bump).
  */

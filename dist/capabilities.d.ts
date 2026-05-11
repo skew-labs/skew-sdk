@@ -1,5 +1,5 @@
 export type SkewCollateralSymbol = "USDC" | "wSOL" | "jitoSOL";
-export type SkewTradeLaneId = "instant_rfq" | "auction_rfq" | "prefunded_listing" | "combo_v1" | "combo_v2" | "conditional_oco" | "builder_routing" | "series_listing" | "cm_collateral";
+export type SkewTradeLaneId = "instant_rfq" | "auction_rfq" | "maker_axe" | "prefunded_listing" | "combo_v1" | "combo_v2" | "conditional_oco" | "builder_routing" | "series_listing" | "cm_collateral";
 export interface SkewCollateralRail {
     symbol: SkewCollateralSymbol;
     decimals: number;
@@ -60,9 +60,9 @@ export declare const SKEW_COLLATERAL_RAILS: readonly [{
     readonly symbol: "jitoSOL";
     readonly decimals: 9;
     readonly custody: "spl-token";
-    readonly role: readonly ["LST collateral", "SOL inverse settlement", "verified-tier lockup"];
+    readonly role: readonly ["LST collateral", "SOL inverse settlement", "clearing-class lockup"];
     readonly liveLanes: readonly ["instant_rfq", "cm_collateral"];
-    readonly note: "Policy-gated LST rail for SOL inverse physical settlement plus Verified-tier lockup. Builders must pass the allowlisted mint and stake-pool path.";
+    readonly note: "Policy-gated LST rail for SOL inverse physical settlement plus clearing-class lockup. Builders must pass the allowlisted mint and stake-pool path.";
 }];
 export declare const SKEW_TRADE_LANES: readonly [{
     readonly id: "instant_rfq";
@@ -73,17 +73,27 @@ export declare const SKEW_TRADE_LANES: readonly [{
     readonly protocol: readonly ["quote_request", "quote_ack", "buyer_accept_tx_signed", "buyer_accept", "fill_consent", "cm_sign", "buyer_tx_request", "buyer_tx_signed", "atomic_fill_from_relay"];
     readonly settlement: readonly ["USDC", "wSOL", "jitoSOL"];
     readonly summary: "Buyer hits a live CM quote; browser buyers sign the final fill transaction, while bot/HSM buyers may additionally sign the RelayPayload digest. CM quotes remain digest-signed.";
-    readonly note: "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills. Do not emulate take_best_quote; it is not in the current IDL.";
+    readonly note: "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills.";
 }, {
     readonly id: "auction_rfq";
     readonly label: "Auction RFQ";
-    readonly status: "keeper-assisted";
+    readonly status: "live";
     readonly primary: true;
-    readonly entrypoints: readonly ["registerRfqMaker", "registerRfqAuction", "submitRfqQuoteDirect", "submitRfqQuote", "submitRfqQuoteSigned", "finalizeRfqAuction", "cancelRfqAuction"];
-    readonly protocol: readonly ["register_rfq_auction", "submit_rfq_quote_tx_signed", "submit_rfq_quote", "finalize_rfq_auction", "cancel_rfq_auction"];
+    readonly entrypoints: readonly ["registerRfqMaker", "registerRfqAuction", "submitRfqQuoteDirect", "submitRfqQuote", "submitRfqQuoteSigned", "refreshQuote", "finalizeRfqAuction", "cancelRfqAuction"];
+    readonly protocol: readonly ["register_rfq_auction", "submit_rfq_quote_tx_signed", "submit_rfq_quote", "refresh_quote", "finalize_rfq_auction", "cancel_rfq_auction"];
     readonly settlement: readonly ["USDC"];
-    readonly summary: "Buyer escrows a max premium, multiple MMs compete with ed25519-signed quotes, and finalization records the winning quote/refund state.";
-    readonly note: "Auction RFQ is price discovery and finalization. Immediate execution should route through Instant RFQ atomic fill.";
+    readonly summary: "Buyer escrows a max premium, multiple MMs compete, and browser tx-signed or bot/HSM ed25519 quotes can be finalized/refunded after close as firm quote tape.";
+    readonly note: "Auction RFQ is price discovery and firm tape at launch. The historical take_best_quote entrypoint is intentionally not exposed until it has complete option mint/close semantics. Cleared PM/CM option minting routes through Instant RFQ atomic fill.";
+}, {
+    readonly id: "maker_axe";
+    readonly label: "Maker Axe Board";
+    readonly status: "live";
+    readonly primary: true;
+    readonly entrypoints: readonly ["publishAxe", "updateAxe", "revokeAxe"];
+    readonly protocol: readonly ["publish_axe", "update_axe", "revoke_axe"];
+    readonly settlement: readonly [];
+    readonly summary: "MMs publish, update, and revoke on-chain inventory-intent axes so traders can discover likely RFQ counterparties.";
+    readonly note: "MakerAxe is a discovery primitive, not settlement. It complements Auction RFQ and Instant RFQ rather than replacing either fill lane.";
 }, {
     readonly id: "prefunded_listing";
     readonly label: "Pre-funded Listing";
@@ -167,8 +177,9 @@ export declare function getSkewCapabilities(): {
     routing: {
         clickToFill: "instant_rfq";
         priceDiscovery: "auction_rfq";
+        auctionHit: "auction_rfq";
+        makerDiscovery: "maker_axe";
         prefundedBuilderPrimitive: "prefunded_listing";
-        deprecatedInstruction: "take_best_quote";
     };
 };
 //# sourceMappingURL=capabilities.d.ts.map

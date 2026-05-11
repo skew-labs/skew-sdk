@@ -1,8 +1,41 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.findSigmaIvPda = exports.findGovernancePda = exports.findIfEscrowPda = exports.findMakerAxePda = exports.findInsuranceFundPda = exports.findLiqStatePda = exports.findPovsStatePda = exports.findHamiltonPda = exports.findCrossAssetMatrixPda = exports.findMicrostructurePda = exports.findFeeConfigPda = exports.findVolumeTrackerPda = exports.findCollateralPolicyPda = exports.findPositionRegistryPda = exports.findCmEscrowPda = exports.findClearingMemberPda = exports.findMetadataPda = exports.findFeeAuthorityPda = exports.findFeeAccumulatorPda = exports.findOptionCollateralLockPda = exports.findOptionTokenMintPda = exports.findEscrowPda = exports.findOptionPda = exports.SKEW_PROGRAM_ID = exports.ConditionalAction = exports.ConditionalTriggerDirection = exports.ConditionalTriggerMode = exports.ConditionalKind = exports.getSkewCapabilities = exports.SKEW_UNDERLYINGS = exports.SKEW_TRADE_LANES = exports.SKEW_TENOR_POLICY = exports.SKEW_PAYOFF_TYPES = exports.SKEW_COLLATERAL_RAILS = exports.SKEW_CAPABILITIES_VERSION = exports.SKEW_ASSET_PAYOFFS = exports.SKEW_ANCHOR_OPTION_TYPES = exports.validateInstantRfqLane = exports.RfqWalletMessageSigningUnsupported = exports.relayPayloadToJson = exports.relayPayloadDigest = exports.hitInstantRfqQuoteTxSigned = exports.hitInstantRfqQuote = exports.encodeRelayPayload = exports.collectInstantRfqQuotes = exports.buildRelayPayload = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = exports.routeToBestQuote = exports.SkewClient = void 0;
-exports.getMarginBreakdown = exports.findAuctionEscrowPda = exports.findAuctionPda = exports.findBuilderEscrowPda = exports.findBuilderCodePda = exports.findSeriesListingPda = exports.findSkewMetricsPda = exports.NATIVE_SOL_MINT = exports.findNativeSolVaultEscrowPda = exports.findNativeSolVaultPda = exports.PYTH_SOL_USD_FEED = exports.JITOSOL_STAKE_POOL = exports.JITOSOL_MINT = exports.findLstVaultEscrowPda = exports.findLstVaultPda = exports.rfqQuoteDigestHex = exports.rfqQuoteDigestBytes = exports.rfqQuoteDigest = exports.findComboIntentV2Pda = exports.findRfqMakerPda = exports.findRfqAuctionEscrowPda = exports.findRfqAuctionPda = exports.findConditionalOrderPda = exports.findComboEscrowPda = exports.findComboIntentPda = exports.findDvolPda = exports.findIsolatedVaultEscrowPda = exports.findIsolatedVaultPda = exports.indexToUnderlying = exports.fromUsdcUnits = exports.fromOnChainStrike = exports.ASSET_DEFAULT_SIGMA = exports.fetchPythSpotUsd = exports.mapPayoffToAnchor = exports.directionToI8 = exports.assetEnumIndex = exports.generateNonce = exports.SKEW_ALLOWED_TENORS_BY_UNDERLYING = exports.TENOR_TOLERANCE_SECONDS = exports.STANDARD_TENOR_DAYS = exports.assertExpiryTenor = exports.expiryTsFromTenorDays = exports.expiryFromTenorDays = exports.isoToUnixSeconds = exports.settlementMintDecimals = exports.toUsdcUnits = exports.toSettlementUnits = exports.toOnChainStrike = exports.resolvePythFeed = exports.MPL_TOKEN_METADATA_PROGRAM_ID = void 0;
-exports.estimateFee = void 0;
+exports.findIfEscrowPda = exports.findMakerAxePda = exports.findInsuranceFundPda = exports.findLiqStatePda = exports.findPovsStatePda = exports.findHamiltonPda = exports.findCrossAssetMatrixPda = exports.findMicrostructurePda = exports.findFeeConfigPda = exports.findVolumeTrackerPda = exports.findCollateralPolicyPda = exports.findOptionRiskCachePda = exports.findCmRiskCachePda = exports.findPositionRegistryPda = exports.findCmEscrowPda = exports.findClearingMemberPda = exports.findMetadataPda = exports.findFeeAuthorityPda = exports.findFeeAccumulatorPda = exports.findOptionCollateralLockPda = exports.findOptionTokenMintPda = exports.findEscrowPda = exports.findOptionPda = exports.SKEW_PROGRAM_ID = exports.ConditionalAction = exports.ConditionalTriggerDirection = exports.ConditionalTriggerMode = exports.ConditionalKind = exports.getSkewCapabilities = exports.SKEW_UNDERLYINGS = exports.SKEW_TRADE_LANES = exports.SKEW_TENOR_POLICY = exports.SKEW_PAYOFF_TYPES = exports.SKEW_COLLATERAL_RAILS = exports.SKEW_CAPABILITIES_VERSION = exports.SKEW_ASSET_PAYOFFS = exports.SKEW_ANCHOR_OPTION_TYPES = exports.validateInstantRfqLane = exports.RfqWalletMessageSigningUnsupported = exports.relayPayloadToJson = exports.relayPayloadDigest = exports.hitInstantRfqQuoteTxSigned = exports.hitInstantRfqQuote = exports.encodeRelayPayload = exports.collectInstantRfqQuotes = exports.buildRelayPayload = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = exports.routeToBestQuote = exports.SkewClient = void 0;
+exports.findBuilderCodePda = exports.findSeriesListingPda = exports.findSkewMetricsPda = exports.NATIVE_SOL_MINT = exports.findNativeSolVaultEscrowPda = exports.findNativeSolVaultPda = exports.PYTH_SOL_USD_FEED = exports.JITOSOL_STAKE_POOL = exports.JITOSOL_MINT = exports.findLstVaultEscrowPda = exports.findLstVaultPda = exports.rfqQuoteDigestHex = exports.rfqQuoteDigestBytes = exports.rfqQuoteDigest = exports.findComboIntentV2Pda = exports.findRfqMakerPda = exports.findRfqAuctionEscrowPda = exports.findRfqAuctionPda = exports.findLegacyRfqEscrowPda = exports.findLegacyRfqPda = exports.findConditionalOrderPda = exports.findComboEscrowPda = exports.findComboIntentPda = exports.findDvolPda = exports.findIsolatedVaultEscrowPda = exports.findIsolatedVaultPda = exports.indexToUnderlying = exports.fromUsdcUnits = exports.fromOnChainStrike = exports.ASSET_DEFAULT_SIGMA = exports.fetchPythSpotUsd = exports.mapPayoffToAnchor = exports.directionToI8 = exports.assetEnumIndex = exports.generateNonce = exports.SKEW_ALLOWED_TENORS_BY_UNDERLYING = exports.TENOR_TOLERANCE_SECONDS = exports.STANDARD_TENOR_DAYS = exports.assertExpiryTenor = exports.expiryTsFromTenorDays = exports.expiryFromTenorDays = exports.isoToUnixSeconds = exports.settlementMintDecimals = exports.toUsdcUnits = exports.toSettlementUnits = exports.toOnChainStrike = exports.resolvePythFeed = exports.MPL_TOKEN_METADATA_PROGRAM_ID = exports.findSigmaIvPda = exports.findGovernancePda = void 0;
+exports.SkewRfqSession = exports.SkewRfqClient = exports.estimateFee = exports.getMarginBreakdown = exports.SkewProgramErrors = exports.findAuctionEscrowPda = exports.findAuctionPda = exports.findBuilderEscrowPda = void 0;
 var client_1 = require("./client");
 Object.defineProperty(exports, "SkewClient", { enumerable: true, get: function () { return client_1.SkewClient; } });
 var router_1 = require("./router");
@@ -47,6 +80,8 @@ Object.defineProperty(exports, "findMetadataPda", { enumerable: true, get: funct
 Object.defineProperty(exports, "findClearingMemberPda", { enumerable: true, get: function () { return pda_1.findClearingMemberPda; } });
 Object.defineProperty(exports, "findCmEscrowPda", { enumerable: true, get: function () { return pda_1.findCmEscrowPda; } });
 Object.defineProperty(exports, "findPositionRegistryPda", { enumerable: true, get: function () { return pda_1.findPositionRegistryPda; } });
+Object.defineProperty(exports, "findCmRiskCachePda", { enumerable: true, get: function () { return pda_1.findCmRiskCachePda; } });
+Object.defineProperty(exports, "findOptionRiskCachePda", { enumerable: true, get: function () { return pda_1.findOptionRiskCachePda; } });
 Object.defineProperty(exports, "findCollateralPolicyPda", { enumerable: true, get: function () { return pda_1.findCollateralPolicyPda; } });
 Object.defineProperty(exports, "findVolumeTrackerPda", { enumerable: true, get: function () { return pda_1.findVolumeTrackerPda; } });
 Object.defineProperty(exports, "findFeeConfigPda", { enumerable: true, get: function () { return pda_1.findFeeConfigPda; } });
@@ -91,6 +126,8 @@ Object.defineProperty(exports, "findComboIntentPda", { enumerable: true, get: fu
 Object.defineProperty(exports, "findComboEscrowPda", { enumerable: true, get: function () { return pda_1.findComboEscrowPda; } });
 // Phase 1633.G — Mainnet hardening (conditional / RFQ / combo v2)
 Object.defineProperty(exports, "findConditionalOrderPda", { enumerable: true, get: function () { return pda_1.findConditionalOrderPda; } });
+Object.defineProperty(exports, "findLegacyRfqPda", { enumerable: true, get: function () { return pda_1.findLegacyRfqPda; } });
+Object.defineProperty(exports, "findLegacyRfqEscrowPda", { enumerable: true, get: function () { return pda_1.findLegacyRfqEscrowPda; } });
 Object.defineProperty(exports, "findRfqAuctionPda", { enumerable: true, get: function () { return pda_1.findRfqAuctionPda; } });
 Object.defineProperty(exports, "findRfqAuctionEscrowPda", { enumerable: true, get: function () { return pda_1.findRfqAuctionEscrowPda; } });
 Object.defineProperty(exports, "findRfqMakerPda", { enumerable: true, get: function () { return pda_1.findRfqMakerPda; } });
@@ -115,8 +152,12 @@ Object.defineProperty(exports, "findBuilderCodePda", { enumerable: true, get: fu
 Object.defineProperty(exports, "findBuilderEscrowPda", { enumerable: true, get: function () { return pda_1.findBuilderEscrowPda; } });
 Object.defineProperty(exports, "findAuctionPda", { enumerable: true, get: function () { return pda_1.findAuctionPda; } });
 Object.defineProperty(exports, "findAuctionEscrowPda", { enumerable: true, get: function () { return pda_1.findAuctionEscrowPda; } });
+exports.SkewProgramErrors = __importStar(require("./generated/errors"));
 var margin_1 = require("./margin");
 Object.defineProperty(exports, "getMarginBreakdown", { enumerable: true, get: function () { return margin_1.getMarginBreakdown; } });
 var fee_1 = require("./fee");
 Object.defineProperty(exports, "estimateFee", { enumerable: true, get: function () { return fee_1.estimateFee; } });
+var rfq_1 = require("./rfq");
+Object.defineProperty(exports, "SkewRfqClient", { enumerable: true, get: function () { return rfq_1.SkewRfqClient; } });
+Object.defineProperty(exports, "SkewRfqSession", { enumerable: true, get: function () { return rfq_1.SkewRfqSession; } });
 //# sourceMappingURL=index.js.map

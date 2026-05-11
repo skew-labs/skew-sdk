@@ -28,6 +28,8 @@ exports.findFeeAuthorityPda = findFeeAuthorityPda;
 exports.findClearingMemberPda = findClearingMemberPda;
 exports.findCmEscrowPda = findCmEscrowPda;
 exports.findPositionRegistryPda = findPositionRegistryPda;
+exports.findCmRiskCachePda = findCmRiskCachePda;
+exports.findOptionRiskCachePda = findOptionRiskCachePda;
 exports.findCollateralPolicyPda = findCollateralPolicyPda;
 exports.findVolumeTrackerPda = findVolumeTrackerPda;
 exports.findFeeConfigPda = findFeeConfigPda;
@@ -57,6 +59,8 @@ exports.findDvolPda = findDvolPda;
 exports.findComboIntentPda = findComboIntentPda;
 exports.findComboEscrowPda = findComboEscrowPda;
 exports.findConditionalOrderPda = findConditionalOrderPda;
+exports.findLegacyRfqPda = findLegacyRfqPda;
+exports.findLegacyRfqEscrowPda = findLegacyRfqEscrowPda;
 exports.findRfqAuctionPda = findRfqAuctionPda;
 exports.findRfqMakerPda = findRfqMakerPda;
 exports.findRfqAuctionEscrowPda = findRfqAuctionEscrowPda;
@@ -240,18 +244,20 @@ const PAYOFF_TABLE = {
         optionType: { cappedVanilla: {} },
         defaultDirection: "buy",
         extraParam: (p) => {
-            if (p.extraParam === undefined)
-                throw new Error("capped_call requires extraParam (cap strike in USD)");
-            return p.extraParam;
+            const cap = p.extraParam ?? p.upperBound;
+            if (cap === undefined)
+                throw new Error("capped_call requires extraParam or upperBound (cap strike in USD)");
+            return cap;
         },
     },
     capped_put: {
         optionType: { cappedVanilla: {} },
         defaultDirection: "sell",
         extraParam: (p) => {
-            if (p.extraParam === undefined)
-                throw new Error("capped_put requires extraParam (cap strike in USD)");
-            return p.extraParam;
+            const cap = p.extraParam ?? p.upperBound;
+            if (cap === undefined)
+                throw new Error("capped_put requires extraParam or upperBound (cap strike in USD)");
+            return cap;
         },
     },
     range_accrual: {
@@ -261,7 +267,7 @@ const PAYOFF_TABLE = {
             const upper = p.upperBound ?? p.extraParam;
             if (upper === undefined)
                 throw new Error("range_accrual requires upperBound (or extraParam) — upper bound USD");
-            return upper;
+            return 0;
         },
     },
     // Phase 2 (2026-05-04) — Inverse family. Premium + payoff in BASE asset.
@@ -333,6 +339,8 @@ const FEE_AUTHORITY_SEED = Buffer.from("fee_authority");
 const CM_SEED = Buffer.from("cm");
 const CM_ESCROW_SEED = Buffer.from("cm_escrow");
 const POSITION_REGISTRY_SEED = Buffer.from("position_registry");
+const CM_RISK_CACHE_SEED = Buffer.from("cm_risk_cache");
+const OPTION_RISK_CACHE_SEED = Buffer.from("option_risk_cache");
 const COLLATERAL_POLICY_SEED = Buffer.from("collateral_policy");
 const MICROSTRUCTURE_SEED = Buffer.from("microstructure");
 const CROSS_ASSET_MATRIX_SEED = Buffer.from("cross_asset_matrix");
@@ -350,6 +358,8 @@ const ISOLATED_VAULT_ATA_SEED = Buffer.from("isolated_vault_ata");
 const DVOL_SEED = Buffer.from("dvol");
 // Phase 1633.G — Mainnet hardening (conditional orders, RFQ auctions, combo v2)
 const CONDITIONAL_ORDER_SEED = Buffer.from("cond_order");
+const LEGACY_RFQ_SEED = Buffer.from("rfq");
+const LEGACY_RFQ_ESCROW_SEED = Buffer.from("rfq_escrow");
 const RFQ_AUCTION_SEED = Buffer.from("rfq_auction");
 const RFQ_AUCTION_ESCROW_SEED = Buffer.from("rfq_escrow");
 const RFQ_MAKER_REGISTRY_SEED = Buffer.from("rfq_maker");
@@ -541,6 +551,14 @@ function findCmEscrowPda(cmPda, programId = exports.SKEW_PROGRAM_ID) {
 function findPositionRegistryPda(authority, programId = exports.SKEW_PROGRAM_ID) {
     return web3_js_1.PublicKey.findProgramAddressSync([POSITION_REGISTRY_SEED, authority.toBuffer()], programId);
 }
+/** Hybrid PM cache sidecar. Seeds: [b"cm_risk_cache", authority]. */
+function findCmRiskCachePda(authority, programId = exports.SKEW_PROGRAM_ID) {
+    return web3_js_1.PublicKey.findProgramAddressSync([CM_RISK_CACHE_SEED, authority.toBuffer()], programId);
+}
+/** Per-option PM contribution cache sidecar. Seeds: [b"option_risk_cache", option]. */
+function findOptionRiskCachePda(optionPda, programId = exports.SKEW_PROGRAM_ID) {
+    return web3_js_1.PublicKey.findProgramAddressSync([OPTION_RISK_CACHE_SEED, optionPda.toBuffer()], programId);
+}
 /** Singleton settlement/collateral mint allowlist PDA. */
 function findCollateralPolicyPda(programId = exports.SKEW_PROGRAM_ID) {
     return web3_js_1.PublicKey.findProgramAddressSync([COLLATERAL_POLICY_SEED], programId);
@@ -660,7 +678,7 @@ function generateNonce() {
 }
 // Pyth expo = -8 → strike in USD must be multiplied by 10^8.
 function toOnChainStrike(usd) {
-    return BigInt(Math.round(usd)) * 100000000n;
+    return BigInt(Math.round(usd * 100000000));
 }
 // Settlement mint (USDC) uses 6 decimals.
 function toUsdcUnits(usd) {
@@ -779,6 +797,16 @@ function findConditionalOrderPda(authority, orderId, programId = exports.SKEW_PR
     const buf = Buffer.alloc(8);
     buf.writeBigUInt64LE(orderId, 0);
     return web3_js_1.PublicKey.findProgramAddressSync([CONDITIONAL_ORDER_SEED, authority.toBuffer(), buf], programId);
+}
+/** Legacy single-MM RFQ PDA. Seeds: [b"rfq", buyer, nonce_le]. */
+function findLegacyRfqPda(buyer, nonce, programId = exports.SKEW_PROGRAM_ID) {
+    const buf = Buffer.alloc(8);
+    buf.writeBigUInt64LE(nonce, 0);
+    return web3_js_1.PublicKey.findProgramAddressSync([LEGACY_RFQ_SEED, buyer.toBuffer(), buf], programId);
+}
+/** Legacy RFQ escrow ATA PDA. Seeds: [b"rfq_escrow", rfq]. */
+function findLegacyRfqEscrowPda(rfq, programId = exports.SKEW_PROGRAM_ID) {
+    return web3_js_1.PublicKey.findProgramAddressSync([LEGACY_RFQ_ESCROW_SEED, rfq.toBuffer()], programId);
 }
 /**
  * RfqAuctionPda — per-(buyer, auction_id) RFQ auction. Buyer escrows

@@ -1,6 +1,12 @@
 # @skew-labs/sdk
 
-TypeScript SDK for Skew, the Solana OTC options clearing infrastructure.
+TypeScript SDK for Skew — the venue-only Solana on-chain OTC options
+protocol. Devnet launch-ready, audit-gated.
+
+Current package version: **0.7.5** (top-level snapshot under
+[`/README.md`](../../README.md)). Generated from the Anchor 0.31.1 IDL of
+`skew-master` (123 ix · `skew_master.so` 2,398,832 B · devnet program
+`3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK`).
 
 The package exposes typed clients for the Anchor program, RFQ lanes,
 portfolio-margin operations, collateral vaults, settlement, fee routing, and
@@ -72,6 +78,22 @@ export KEYPAIR_PATH=~/.config/solana/devnet.json
 export SKEW_KEYPAIR_PATH=~/.config/solana/devnet.json
 ```
 
+## Public margin labels
+
+Public docs and UIs should display margin-mode ranks as `M0`, `M1`, `M2`, and
+`M3`.
+
+| Public label | Rank | Launch posture |
+|---|---:|---|
+| `M0` | 0 | Default devnet clearing profile |
+| `M1` | 1 | Audit-gated higher-collateral profile |
+| `M2` | 2 | Audit-gated institutional profile |
+| `M3` | 3 | Audit-gated highest-rank profile |
+
+Some SDK response fields still use prelaunch field names such as `tier` or
+`verified_tier`. Treat those as compatibility names around the same four ranks;
+new public-facing copy should render the ranks as `M0` through `M3`.
+
 ## Capability map
 
 ```typescript
@@ -97,6 +119,83 @@ if (!policy.entries.some((e) => e.mint.equals(mySettlementMint))) {
   throw new Error("settlement mint is not allowlisted on this deployment");
 }
 ```
+
+---
+
+## Official RFQ API
+
+The high-level RFQ surface is the recommended integration path for desks,
+judges, bots, and dApps. It wraps the lower-level relay primitives without
+changing them:
+
+```typescript
+const rfq = await skew.rfq.request({
+  asset: "BTC",
+  payoff: "vanilla_call",
+  strike: 60_000,
+  notional: 10_000,
+  expiry: "7d",
+  maxPremiumUsd: 300,
+});
+
+for await (const quote of rfq.quotes()) {
+  console.log("quote", quote.makerBase58, quote.premiumUsd);
+}
+
+const best = await rfq.waitForBestQuote({ timeoutMs: 60_000 });
+const fill = await rfq.accept(best, { maxPremiumUsd: 300 });
+
+console.log(fill.optionPda);
+console.log(fill.margin.pmLockedDeltaUsd);
+console.log(fill.margin.pmLockedDeltaPctOfNotional);
+console.log(fill.portfolio.buyerHasLong, fill.portfolio.makerHasShort);
+```
+
+`rfq.accept(...)` always uses the Instant RFQ PM-backed lane:
+
+```txt
+quote_request -> quote_ack -> buyer_accept_tx_signed -> cm_sign
+-> buyer_tx_signed -> atomic_fill_from_relay
+```
+
+The older `create() -> deposit_collateral -> buy()` path remains available as
+the fully-collateralized primitive, but it is not the official RFQ clearing
+path.
+
+Maker bots can serve one RFQ with the same facade while keeping their own
+pricing and signing policy:
+
+```typescript
+import nacl from "tweetnacl";
+
+await skew.rfq.maker.serve({
+  autoPrepare: true,
+  initialCollateralUsdc: 50_000,
+  refreshPmCacheBeforeQuote: true,
+  filters: { assets: ["BTC", "SOL"] },
+  quote: async (request) => ({
+    premiumUsd: myModel.price(request),
+    ttlSeconds: 60,
+  }),
+  signDigest: (digest) => nacl.sign.detached(digest, makerKeypair.secretKey),
+});
+```
+
+`autoPrepare` registers the maker as a CM/RFQ maker when needed, initializes
+the volume tracker, and refreshes the PM cache. `refreshPmCacheBeforeQuote`
+keeps long-running maker processes from quoting against a stale cache.
+
+The facade performs SDK-side tenor, payoff, settlement, and devnet oracle
+moneyness preflight before it opens the relay request. For example, a BTC
+strike that is valid against live Hermes may still be rejected on devnet if it
+is outside the currently deployed frozen-Pyth strike band; the SDK returns a
+clear error before asking the wallet to sign.
+
+Low-level functions remain exported for advanced integrations:
+`collectInstantRfqQuotes`, `buildRelayPayload`, and
+`hitInstantRfqQuoteTxSigned`.
+
+Canonical API contract: [`docs/api/official-rfq.md`](../../docs/api/official-rfq.md).
 
 ---
 
@@ -140,9 +239,9 @@ preflight in `create()` and `registerRfqAuction()`, so invalid tenors and
 millisecond-vs-second mistakes fail with a local error instead of an Anchor
 simulation label such as `6001`.
 
-That's the happy path. The other ~86 methods exist because real trading needs collateral top-ups, transfers, cancellations, multi-leg combos, isolated margin, liquidations, conditional orders (SL / TP / OCO), escrow-aware RFQ auctions with ed25519-verified MM quotes, 32-leg combo intents, secondary-market Dutch auctions, builder-code revenue share, series-listing keepers, LST-backed Verified-tier lockup, and the long tail of bookkeeping the on-chain program enforces.
+That's the happy path. The other ~86 methods exist because real trading needs collateral top-ups, transfers, cancellations, multi-leg combos, isolated margin, liquidations, conditional orders (SL / TP / OCO), escrow-aware RFQ auctions with ed25519-verified MM quotes, 32-leg combo intents, secondary-market Dutch auctions, builder-code revenue share, series-listing keepers, M-mode collateral lockup, and the long tail of bookkeeping the on-chain program enforces.
 
-Methods are grouped below. **Mainnet hardening additions** (conditional orders, RFQ auctions, combo intent v2 — 22 methods total) are GA on devnet as of 2026-05-01 and have their own dedicated sections.
+Methods are grouped below. **Devnet launch additions** (conditional orders, RFQ auctions, combo intent v2 - 22 methods total) are available on devnet as of 2026-05-01 and have their own dedicated sections. Mainnet remains audit-gated.
 
 ---
 
@@ -227,6 +326,11 @@ For immediate click-to-fill, use the relay lane:
 `quote_request -> quote_ack -> buyer_accept_tx_signed -> fill_consent -> cm_sign -> buyer_tx_request -> buyer_tx_signed -> atomic_fill_from_relay`
 
 The SDK exports `collectInstantRfqQuotes`, `buildRelayPayload`, `relayPayloadDigest`, and browser-safe `hitInstantRfqQuoteTxSigned` so clients do not need to emulate the removed `take_best_quote` instruction. `hitInstantRfqQuote` remains for bot/HSM clients that can produce detached message signatures.
+
+Human-paced Instant RFQ demos are supported directly: quote collection defaults
+to 60 seconds, hit/fill waiting defaults to 120 seconds, and unsigned relay
+payloads default to a 10 minute quote expiry unless the caller supplies a
+shorter `quoteExpiryTs`.
 
 `hitInstantRfqQuote` returns `riskPreflight` after relay simulation. It includes
 the maker's exact `preImMicro -> postImMicro`, `requiredDeltaMicro`,
@@ -315,16 +419,16 @@ the builder's settlement-mint token account inside `atomic_fill_from_relay`.
 ```typescript
 import { getMarginBreakdown, estimateFee } from "@skew-labs/sdk";
 
-const breakdown = await getMarginBreakdown(legs, { tier: "Gold" });
-//   → { im_standard, im_silver, im_gold, im_platinum, scenarios: [...] }
+const breakdown = await getMarginBreakdown(legs);
+// Public UIs should label the four returned margin ranks as M0/M1/M2/M3.
 
 const fee = await estimateFee({
-  notional: 1_000, side: "Buy", tier: "Verified", vipBucket: 2,
+  notional: 1_000, side: "Buy", vipBucket: 2,
 });
-//   → { totalFeeBps, breakdown: { base, vipDiscount, verifiedDiscount, builderShare } }
+//   -> fee totals and discount components for the current launch config
 ```
 
-Both call the same `skew-pricing` HTTP service the terminal calls. No wallet and no signing are needed. Public web API calls are rate-limited by Vercel middleware; direct pricing-service calls follow the pricing service deployment limits.
+Both call the same `skew-pricing` HTTP service the terminal calls. No wallet and no signing are needed. Public web API calls are rate-limited by Vercel middleware; direct pricing-service calls follow the pricing service deployment limits. Pricing responses may keep compatibility field names until the next versioned SDK cleanup; public docs should display margin ranks as `M0` through `M3`.
 
 ---
 
@@ -436,7 +540,7 @@ await skew.create({
 Instant RFQ WebSocket:
 - Endpoint: `wss://skew-relay-devnet.fly.dev/subscribe`
 - `quote_request` collects CM quotes; `buyer_accept_tx_signed` + `cm_sign` prepares the fill tx; `buyer_tx_signed` lands `atomic_fill_from_relay`
-- Fixed 100-byte `RelayPayload` + digest helpers ship from `@skew-labs/sdk`
+- Fixed 132-byte `RelayPayload` + digest helpers ship from `@skew-labs/sdk`
 - Catalog: [`docs/runbooks/relay-protocol.md`](../docs/runbooks/relay-protocol.md)
 
 Self-onboarding MM bot template: [`docs/runbooks/sdk-developer-quickstart.md`](../../docs/runbooks/sdk-developer-quickstart.md).

@@ -1,6 +1,6 @@
 {
   "name": "@skew-labs/sdk",
-  "version": "0.4.6",
+  "version": "0.7.5",
   "description": "TypeScript SDK for Skew — Solana options infrastructure. Create, buy, settle options in five lines.",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -37,27 +37,41 @@
     "./idl/*.json": "./idl/*.json",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "idl", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "idl",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "strip-idl": "node scripts/strip_idl.mjs",
     "verify:no-leak": "node scripts/verify_no_leak.mjs",
+    "gen:sdk": "bash scripts/codegen.sh",
+    "check:gen-clean": "bash -c 'npm run gen:sdk && git diff --exit-code src/generated'",
     "prepublishOnly": "npm run strip-idl && npm run build && npm run verify:no-leak"
   },
   "peerDependencies": {
     "@coral-xyz/anchor": "^0.31.1",
+    "@coral-xyz/borsh": "^0.31.1",
     "@solana/spl-token": "^0.4.0",
-    "@solana/web3.js": "^1.95.0"
+    "@solana/web3.js": "^1.95.0",
+    "bn.js": "^5.2.0"
   },
   "dependencies": {
-    "@noble/hashes": "^1.4.0"
+    "@noble/hashes": "^1.4.0",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@coral-xyz/anchor": "^0.31.1",
+    "@coral-xyz/borsh": "^0.31.1",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.95.3",
+    "@types/bn.js": "^5.1.5",
     "@types/node": "^20.14.0",
+    "anchor-client-gen": "^0.28.1",
+    "bn.js": "^5.2.0",
     "typescript": "^5.6.3"
   }
 }

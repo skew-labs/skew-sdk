@@ -1,0 +1,1 @@
+{"version":3,"file":"emergencyPause.d.ts","sourceRoot":"","sources":["../../../src/generated/instructions/emergencyPause.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,sBAAsB,EAAE,SAAS,EAAe,MAAM,iBAAiB,CAAA;AAMhF,MAAM,WAAW,sBAAsB;IACrC,SAAS,EAAE,SAAS,CAAA;IACpB,SAAS,EAAE,SAAS,CAAA;IACpB,UAAU,EAAE,SAAS,CAAA;CACtB;AAED,wBAAgB,cAAc,CAC5B,QAAQ,EAAE,sBAAsB,EAChC,SAAS,GAAE,SAAsB,0BAWlC"}

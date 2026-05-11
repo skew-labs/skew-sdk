@@ -5,18 +5,18 @@
 // This module is the off-chain fold.
 //
 // Strategy: given N auction PDAs, fetch each `auction.best_quote`, sort by
-// premium ascending, and return the preview shape. The current Anchor IDL no
-// longer exposes `take_best_quote`, so this module deliberately refuses to
-// execute auction quotes as fills. Skew now has two RFQ lanes:
+// premium ascending, and return a launch-safe route preview. Skew has two RFQ lanes:
 //   1. Instant RFQ HIT: relay websocket quote_request →
 //      buyer_accept_tx_signed → cm_sign → buyer_tx_signed →
 //      atomic_fill_from_relay. Bot/HSM callers may still use legacy
 //      buyer_accept with a detached digest signature.
-//   2. Auction RFQ: register_rfq_auction → submit_rfq_quote →
-//      finalize_rfq_auction. This is price discovery / event finalization.
+//   2. Auction RFQ: register_rfq_auction → submit_rfq_quote/direct →
+//      finalize_rfq_auction as firm quote tape / price discovery.
 //
-// The "aggregator" is purely informational at first glance — multi-auction
-// browsing — but the value is the unified 1-button "fill all" execution.
+// The current program's take_best_quote path is not exposed by the launch SDK:
+// it does not mint/novate a cleared option and can leave premium escrow behind.
+// Keep aggregation as deterministic routing intelligence until the on-chain
+// execution semantics are completed.
 
 import type { PublicKey } from "@solana/web3.js";
 import { SkewClient } from "./client";
@@ -46,7 +46,7 @@ export interface RouteOptions {
   topN?: number;
   /** Stop after total payoffMicro accumulates to this cap. */
   notionalCapMicro?: bigint;
-  /** Deprecated no-op; auction quote execution is disabled in current RFQ v1. */
+  /** Deprecated no-op; relay-signed auction takes remain disabled. */
   viaRelay?: boolean;
 }
 
@@ -73,20 +73,20 @@ export interface RouteResult {
 }
 
 /**
- * Deprecated execution helper. Kept for API compatibility so old callers fail
- * loudly instead of trying to build an instruction that is not in the IDL.
+ * Route across already-fetched Auction RFQ candidates.
  *
  * Caller is responsible for `RouterCandidate[]` construction — typically
  * fetched via `client.fetchRfqAuction(...)` per auction PDA, or from the
  * cached `/api/rfq-auctions` indexer feed.
+ *
+ * Launch behavior is fail-closed: Auction RFQ can publish/finalize a firm
+ * quote tape, but cleared execution routes through Instant RFQ.
  */
 export async function routeToBestQuote(
   client: SkewClient,
   candidates: RouterCandidate[],
   opts: RouteOptions = {},
 ): Promise<RouteResult> {
-  void client;
-  void opts;
   const mode = opts.mode ?? "aggressive";
   const topN = opts.topN ?? Infinity;
 
@@ -111,11 +111,14 @@ export async function routeToBestQuote(
       skipped.push(c);
       continue;
     }
+    void client;
+    void opts.viaRelay;
+    skipped.push(c);
     failures.push({
       auction: c.auction.toBase58(),
       premiumMicro: c.bestPremiumMicro,
       error:
-        "take_best_quote is not in the current skew_master IDL. Use Instant RFQ relay HIT (buyer_accept_tx_signed + cm_sign + buyer_tx_signed) for click-to-fill, or finalize the auction lane after close_slot.",
+        "Auction RFQ HIT is disabled in the launch program. Use finalize_rfq_auction for tape, then Instant RFQ atomic_fill_from_relay for cleared execution.",
     });
   }
   // mode=aggressive remainder beyond topN doesn't apply; if topN ≤ sorted.length

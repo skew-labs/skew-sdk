@@ -1,6 +1,7 @@
-import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { Program, type Wallet, type Idl } from "@coral-xyz/anchor";
-import type { CreateParams, CreateResult, BuyResult, SettleResult, RegisterCmParams, RegisterCmResult, TxResult, MarginCalcResult, ListOptionsOpts, OptionSummary, IsolatedVaultSnapshot, DvolSnapshot, ComboLeg, ComboIntentSnapshot, RecoveryWinnerCm, RecoveryStepResult, PoVSStateSnapshot, HamiltonSnapshot, SkewMetricsSnapshot, InsuranceFundSnapshot, ClearingMemberSnapshot, LstVaultSnapshot, NativeSolVaultSnapshot, SeriesListingSnapshot, BuilderCodeSnapshot, ConditionalOrderSnapshot, RfqAuctionSnapshot, ComboIntentV2Snapshot, CrossAssetSnapshot, MicrostructureSnapshot, CollateralPolicySnapshot, RfqMakerSnapshot } from "./types";
+import type { CreateParams, CreateResult, BuyResult, BuyFromRfqAuctionResult, SettleResult, RegisterCmParams, RegisterCmResult, TxResult, MarginCalcResult, ListOptionsOpts, ListRfqAuctionsOpts, ListSecondaryListingsOpts, CreateSecondaryListingArgs, CreateSecondaryListingResult, BuySecondaryListingArgs, BuySecondaryListingResult, OptionSummary, RfqAuctionIndexResponse, RfqQuoteTapeResponse, SecondaryListingIndexResponse, CreateFromRfqAuctionResult, PortfolioSnapshot, IsolatedVaultSnapshot, DvolSnapshot, ComboLeg, ComboIntentSnapshot, RecoveryWinnerCm, RecoveryStepResult, PoVSStateSnapshot, HamiltonSnapshot, SkewMetricsSnapshot, InsuranceFundSnapshot, ClearingMemberSnapshot, LstVaultSnapshot, NativeSolVaultSnapshot, SeriesListingSnapshot, BuilderCodeSnapshot, ConditionalOrderSnapshot, RfqAuctionSnapshot, ComboIntentV2Snapshot, CrossAssetSnapshot, MicrostructureSnapshot, CollateralPolicySnapshot, RfqMakerSnapshot, PmCacheSnapshot, IncrementalMarginPreview, RentReclaimableItem } from "./types";
+import { SkewRfqClient } from "./rfq";
 export interface SkewClientOptions {
     programId?: string;
     usdcMint?: string;
@@ -29,9 +30,14 @@ export declare class SkewClient {
     private wallet;
     private connection;
     private usdcMint;
+    readonly rfq: SkewRfqClient;
     /** Authority pubkey backing this client (matches anchor `cm.authority`
      *  for register_clearing_member / cm_add_collateral / etc). Read-only. */
     get walletPublicKey(): PublicKey;
+    /** Read-only access for high-level SDK facades that need RPC account checks. */
+    get solanaConnection(): Connection;
+    /** Settlement mint used by default for USDC/stable flows. */
+    get usdcMintPublicKey(): PublicKey;
     constructor(connection: Connection, wallet: Wallet, options?: SkewClientOptions);
     /**
      * Load the SDK with a pre-built Program instance — the canonical entry point.
@@ -45,7 +51,12 @@ export declare class SkewClient {
     private _program;
     /** Back-compat alias for guard checks. */
     private _assertProgramLoaded;
+    /** Sign a transaction with the configured wallet. Used by RFQ accept flows. */
+    signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T>;
     private _collateralPolicy;
+    private _signApiMessage;
+    private _secondaryListingMessage;
+    private _secondaryBuyIntentMessage;
     /**
      * Read the live CollateralPolicyPda mint allowlist for this deployment.
      *
@@ -56,6 +67,9 @@ export declare class SkewClient {
      */
     fetchCollateralPolicy(): Promise<CollateralPolicySnapshot>;
     private _requireCollateralPolicyMint;
+    private _requireUsdcBalance;
+    private _ensureClearingMemberLayout;
+    private _ensureRfqMakerRegistryLayout;
     private _hamiltonRemaining;
     private _povsRemaining;
     private _positionRegistryRemaining;
@@ -112,6 +126,7 @@ export declare class SkewClient {
      * calculation are all internal.
      */
     buy(option: string | PublicKey, premiumUsd: number): Promise<BuyResult>;
+    private _buyWithPremiumMicro;
     /**
      * Settle an expired option. Permissionless — anyone can call.
      * Reads Pyth price, routes payoff to holder, returns residual to creator.
@@ -207,7 +222,15 @@ export declare class SkewClient {
      * @example
      *   await skew.transferOption(optionPda, newHolderPubkey);
      */
-    transferOption(option: string | PublicKey, newHolder: string | PublicKey): Promise<TxResult>;
+    transferOption(option: string | PublicKey, newHolder: string | PublicKey): Promise<TxResult & {
+        readbackOk: boolean;
+        readbackErrors: string[];
+        oldHolder: string;
+        newHolder: string;
+        optionReadback?: OptionSummary;
+        oldHolderPortfolioContainsOption?: boolean;
+        newHolderPortfolioContainsOption?: boolean;
+    }>;
     /**
      * Bundle `transfer_option` + `settle` into a single atomic tx (single-signer).
      *
@@ -281,6 +304,18 @@ export declare class SkewClient {
      * this sweep is intentionally separate so settlement stays on the hot path.
      */
     closeOptionCollateralLock(option: string | PublicKey): Promise<TxResult>;
+    /** Close a terminal RFQ auction and its zero-balance escrow ATA. */
+    closeRfqAuction(buyer: PublicKey, auctionId: bigint): Promise<TxResult>;
+    /** Close a quote-off, non-slashable RFQ maker registry and reclaim the bond. */
+    closeRfqMakerRegistry(mm?: PublicKey): Promise<TxResult>;
+    /** Close a fully-filled combo v2 receipt PDA. */
+    closeFinalizedComboV2(comboId: bigint): Promise<TxResult>;
+    /**
+     * Conservative rent-reclaim discovery for the current wallet.
+     * Returns only closes that can be proven from cheap reads; absence from this
+     * list does not imply the account is not closeable.
+     */
+    listRentReclaimable(authority?: PublicKey): Promise<RentReclaimableItem[]>;
     /**
      * Track an option token held by this wallet as a CM long hedge.
      *
@@ -317,6 +352,29 @@ export declare class SkewClient {
      *   console.log(`free: $${Number(m.freeCollateralUsdcMicro) / 1e6}`);
      */
     calculateMargin(currentSpotUsd: number): Promise<MarginCalcResult>;
+    /** Init the hybrid PM cache sidecar for this wallet's CM. */
+    initPmCache(cmAuthority?: PublicKey): Promise<TxResult & {
+        cache: PublicKey;
+    }>;
+    /** Read the hybrid PM cache sidecar without mutating chain state. */
+    fetchPmCache(cmAuthority?: PublicKey): Promise<PmCacheSnapshot>;
+    /** Full-walk PM refresh that writes the cache sidecar. */
+    refreshPmCacheFull(currentSpotUsd?: number, cmAuthority?: PublicKey): Promise<MarginCalcResult & {
+        cache: PublicKey;
+    }>;
+    /** Cached IM query. Fails closed if the cache is dirty/stale or registry hash mismatches. */
+    calculateMarginCached(currentSpotUsd?: number, cmAuthority?: PublicKey): Promise<MarginCalcResult & {
+        cache: PublicKey;
+    }>;
+    /**
+     * Cache-aware preview shell for agents/UI. Exact post-IM still belongs to
+     * the relay/API pricing engine; this method exposes cache freshness and can
+     * combine a caller-supplied post-IM estimate without sending a tx.
+     */
+    previewIncrementalMargin(args?: {
+        cmAuthority?: PublicKey;
+        estimatedPostImMicro?: bigint;
+    }): Promise<IncrementalMarginPreview>;
     /**
      * Sweep an abandoned option after the 72h grace window past expiry.
      * Distinct from `closeExpired` which closes within 72h. Returns escrow to
@@ -394,8 +452,91 @@ export declare class SkewClient {
      *   });
      */
     listOptions(opts?: ListOptionsOpts): Promise<OptionSummary[]>;
+    /**
+     * List live Auction RFQs from the same public tape endpoint used by the
+     * terminal. The endpoint merges the indexer view with a bounded on-chain
+     * snapshot, so a freshly submitted auction can be discovered even when the
+     * event indexer is behind.
+     */
+    listRfqAuctions(opts?: ListRfqAuctionsOpts): Promise<RfqAuctionIndexResponse>;
+    /**
+     * List firm/indicative quotes for one Auction RFQ PDA from the same public
+     * tape endpoint used by the terminal. If the indexer is behind, the endpoint
+     * falls back to the on-chain auction snapshot's best quote.
+     */
+    listRfqQuotes(auction: string | PublicKey, opts?: {
+        webUrl?: string;
+        limit?: number;
+    }): Promise<RfqQuoteTapeResponse>;
+    /**
+     * List the secondary market tape from the same public endpoint used by the
+     * terminal. This is a readback surface, not an execution primitive: fills
+     * should still go through the SDK/MCP/API trade path that holds the wallet.
+     */
+    listSecondaryListings(opts?: ListSecondaryListingsOpts): Promise<SecondaryListingIndexResponse>;
+    /**
+     * Post a seller-signed secondary-market discovery row. This is a tape
+     * listing, not escrow custody: the option remains in the seller wallet
+     * until the seller later signs `transferOption`.
+     */
+    createSecondaryListing(args: CreateSecondaryListingArgs): Promise<CreateSecondaryListingResult>;
+    /**
+     * Pay a secondary listing seller in devnet USDC and record a buyer-signed
+     * buy intent on the public tape. Completion still requires the seller to
+     * sign `transferOption(option, buyer)` because the current secondary lane
+     * is escrow-less discovery plus explicit option transfer.
+     */
+    buySecondaryListing(args: BuySecondaryListingArgs): Promise<BuySecondaryListingResult>;
+    /**
+     * Create a real pre-funded OptionAccount from the terms of an Auction RFQ's
+     * current best firm quote. This is the low-CU execution bridge for local
+     * MCP demos and builder bots:
+     *
+     * 1. Buyer opens an Auction RFQ.
+     * 2. Maker submits a firm quote.
+     * 3. Maker calls this method to create/deposit the actual option matching
+     *    the auction terms.
+     * 4. Buyer calls `buy(option, premiumUsd)` using the returned premium.
+     *
+     * This method does not mutate the auction PDA, and it does not pretend that
+     * `finalize_rfq_auction` mints an option. The returned option PDA is the
+     * actual execution artifact that portfolio/readback tools must track.
+     */
+    createOptionFromRfqAuction(args: {
+        auction: string | PublicKey;
+        allowExpiredQuote?: boolean;
+        requireBestQuoteForMaker?: boolean;
+        simulateOnly?: boolean;
+        dryRun?: boolean;
+        simulate?: boolean;
+    }): Promise<CreateFromRfqAuctionResult>;
+    /**
+     * Buyer-side RFQ execution guard for the Auction RFQ -> pre-funded option
+     * bridge. The on-chain `buy_option` primitive intentionally knows only the
+     * funded option PDA and premium amount, so this SDK helper binds a buyer
+     * action back to the auction tape before sending the transaction:
+     *
+     * - configured wallet must be the RFQ buyer
+     * - current best quote maker must match the option creator
+     * - option terms must match the auction spec
+     * - exact best-quote premium is passed to `buy_option`
+     */
+    buyOptionFromRfqAuction(args: {
+        auction: string | PublicKey;
+        option: string | PublicKey;
+        allowExpiredQuote?: boolean;
+    }): Promise<BuyFromRfqAuctionResult>;
+    /**
+     * Portfolio readback from the actual OptionAccount source of truth. Longs are
+     * current-holder matches; shorts are creator/writer matches. A single option
+     * can appear in both lists while the creator still holds an unsold listing,
+     * so `options` de-duplicates by PDA for receipt-style callers.
+     */
+    getPortfolio(owner?: string | PublicKey): Promise<PortfolioSnapshot>;
     private _fetchOption;
     private _sendAndConfirm;
+    private _typedProgramError;
+    private _confirmedTransactionLogs;
     private _simulateTransaction;
     /**
      * One-shot per (user, option) — initialise the IsolatedVault PDA + escrow ATA.
@@ -629,6 +770,16 @@ export declare class SkewClient {
          * until RFQ auction custody is upgraded beyond v1.
          */
         settlementMint?: PublicKey;
+        /** W2 #2 (2026-05-08) — block trade flag. Default false. */
+        isBlockTrade?: boolean;
+        /** W2 #2 — minimum size hint (USDC micro). Default 0. */
+        minimumSizeMicro?: bigint;
+        /**
+         * Wave 5B (2026-05-08) — Rule 5.21 RFQ-3 minimum. Off-chain pre-counts
+         * registered makers under separate beneficial ownership; on-chain
+         * rejects below AUCTION_MIN_MAKERS = 3. Default 3.
+         */
+        eligibleMakerCount?: number;
     }): Promise<TxResult & {
         auction: PublicKey;
         escrow: PublicKey;
@@ -656,35 +807,42 @@ export declare class SkewClient {
     }): Promise<TxResult>;
     /**
      * Browser/direct RFQ quote lane. The MM wallet signs the transaction only;
-     * no detached `signMessage` digest is required. Use this from terminal UI.
+     * no detached `signMessage` digest is required. This is the terminal MM
+     * quote path. The auction can later be finalized as firm quote tape; any
+     * cleared option position still routes through Instant RFQ atomic fill with
+     * fresh buyer/MM consent.
      */
     submitRfqQuoteDirect(args: {
         auction: PublicKey;
         premiumMicro: bigint;
         validUntilSlot: bigint;
     }): Promise<TxResult>;
-    /** Permissionless RFQ finalizer. Refunds RFQ escrow to buyer; relay atomic fill handles option mint + MM premium. */
+    /**
+     * Permissionless RFQ finalizer. Refunds RFQ escrow to buyer and records the
+     * auction result after close. Both browser tx-signed quotes and bot/HSM
+     * Ed25519 quotes are valid firm tape; cleared option execution remains the
+     * Instant RFQ atomic-fill lane.
+     */
     finalizeRfqAuction(args: {
         auction: PublicKey;
-        buyerUsdcAta: PublicKey;
+        buyerUsdcAta?: PublicKey;
     }): Promise<TxResult>;
     /** Buyer-initiated cancel. Pre-close only if no quotes received. */
     cancelRfqAuction(auction: PublicKey): Promise<TxResult>;
     /**
-     * Deprecated compatibility shim.
+     * Historical buyer-accept helper for Auction RFQ.
      *
-     * The current Anchor IDL no longer exposes `take_best_quote`. Do not emulate
-     * it against RFQ-auction state. Use the Instant RFQ relay lane for 1-click
-     * HIT (`buyer_accept_tx_signed` → `cm_sign` → `buyer_tx_signed` →
-     * `atomic_fill_from_relay`) or keep the
-     * auction lane as price discovery + `finalizeRfqAuction`.
+     * Launch SDK keeps this fail-closed because the current raw program path
+     * does not mint/novate a cleared option and can leave premium escrow behind.
+     * Use `finalizeRfqAuction` for auction tape/refund and Instant RFQ atomic
+     * fill for a real PM/CM option position.
      */
     takeBestQuote(args: {
         auction: PublicKey;
         expectedPremiumMicro: bigint;
         /** Override buyer USDC ATA. Defaults to derived ATA on this.usdcMint. */
         buyerUsdcAta?: PublicKey;
-        /** Deprecated no-op; relay take-best-quote now returns HTTP 410. */
+        /** Deprecated no-op; retained for old callers. */
         viaRelay?: boolean;
         /** Deprecated no-op; retained for old callers. */
         relayBase?: string;
@@ -706,7 +864,7 @@ export declare class SkewClient {
         atomic: boolean;
         fillError?: string;
     }>;
-    /** Deprecated compatibility shim; current IDL does not expose refresh_quote. */
+    /** MM refreshes its current best quote before the auction closes. */
     refreshQuote(args: {
         auction: PublicKey;
         premiumMicro: bigint;
@@ -772,20 +930,20 @@ export declare class SkewClient {
     /** Permissionless cleanup — closes an expired intent past its `expiresTs`. */
     cleanupExpiredComboV2(buyerAuthority: PublicKey, comboId: bigint): Promise<TxResult>;
     /**
-     * Step the CM up to a higher Verified tier. Locks the tier-specific USDC
+     * Step the CM up to a higher clearing class. Locks the class-specific USDC
      * floor for 30 days (TIER_LOCKUP_MIN_SECONDS) — `cm.tier_lockup_collateral`
      * is subtracted from `free_collateral()` so it cannot be withdrawn, while
      * `tradable_collateral()` keeps it available for IM and first-loss default
      * waterfall semantics. Strict rank increase only.
      *
-     * Tier ranks:
-     *   0 = Standard ($0)
-     *   1 = Silver ($500K)
-     *   2 = Gold ($2M)
-     *   3 = Platinum ($10M)
+     * Compatibility ranks:
+     *   0 = M0 Segregated ($0)
+     *   1 = M1 Portfolio ($500K)
+     *   2 = M2 Cross-Asset ($2M)
+     *   3 = M3 Clearing Prime ($10M)
      *
      * @example
-     *   await skew.upgradeTier(2); // Standard/Silver → Gold
+     *   await skew.upgradeTier(2); // M0/M1 -> M2 Cross-Asset
      */
     upgradeTier(targetRank: 0 | 1 | 2 | 3, lst?: {
         lstVault: PublicKey;
@@ -793,12 +951,12 @@ export declare class SkewClient {
         solUsdPyth?: PublicKey;
     }): Promise<TxResult>;
     /**
-     * Step the CM down to a lower Verified tier. Releases the tier-specific
+     * Step the CM down to a lower clearing class. Releases the class-specific
      * USDC lockup back into `free_collateral`. Requires `now ≥ tier_locked_until`
      * (30 d after most recent upgrade). Strict rank decrease only.
      *
      * @example
-     *   await skew.downgradeTier(1); // Gold/Platinum → Silver
+     *   await skew.downgradeTier(1); // M2/M3 -> M1 Portfolio
      */
     downgradeTier(targetRank: 0 | 1 | 2 | 3, lstVault?: PublicKey): Promise<TxResult>;
     /**
@@ -832,6 +990,8 @@ export declare class SkewClient {
      *   await skew.callVariationMargin(targetCmAuthority, [...optionPdas, ...stateAccounts]);
      */
     callVariationMargin(cmAuthority: PublicKey, remainingAccounts?: PublicKey[]): Promise<TxResult>;
+    /** Cached variation-margin crank. Fails closed if cache is stale/dirty. */
+    callVariationMarginCached(cmAuthority: PublicKey): Promise<TxResult>;
     /**
      * One-shot per (user, lst_mint) — initialise the LstVault PDA + escrow
      * ATA. Phase 1 only accepts jitoSOL (`JITOSOL_MINT`). Subsequent
@@ -994,7 +1154,7 @@ export declare class SkewClient {
      *   64     bump                  (u8)
      *
      * Smaller than LstVault (105 B) — no lst_mint dimension, no tier_locked_qty
-     * (Verified-tier lockup is jitoSOL-only by design).
+     * (class lockup is jitoSOL-only by design).
      */
     fetchNativeSolVault(user: PublicKey): Promise<NativeSolVaultSnapshot | null>;
     /** Decoded SeriesListingPda — σ·√T grid cell metadata. */

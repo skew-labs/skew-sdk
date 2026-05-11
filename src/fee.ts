@@ -1,6 +1,6 @@
 // Off-chain fee estimator — calls the skew-pricing `/estimate_fee` REST
 // endpoint and returns the v5.1 effective fee breakdown for a candidate
-// trade (VIP × Verified-tier × Builder).
+// trade (VIP x clearing-class x Builder).
 //
 // The on-chain `compute_effective_fee_bps` is bit-identical with this
 // preview when the inputs match; integrators should still rely on the
@@ -15,11 +15,11 @@ export type FeeSide = "taker" | "maker";
 export interface FeeBreakdown {
   /** Resolved VIP tier (0..6) from 30d volume + equity. */
   vip_tier: 0 | 1 | 2 | 3 | 4 | 5 | 6;
-  /** Verified tier echo. */
+  /** Clearing-class compatibility echo. */
   verified_tier: VerifiedTier;
   /** Side echo (`"taker"` or `"maker"`). */
   side: FeeSide;
-  /** Effective fee in bps after VIP × Verified discounts. */
+  /** Effective fee in bps after VIP and clearing-class discounts. */
   effective_bps: number;
   /** Effective fee in USD on the supplied premium. */
   fee_usd: number;
@@ -29,11 +29,11 @@ export interface FeeBreakdown {
   protocol_fee_usd: number;
   /** Builder's portion of the taker fee (USD). Zero when not routed via builder. */
   builder_fee_usd: number;
-  /** Base fee in bps (3.0 for Skew v5.1, matching Deribit). */
+  /** Base fee in bps. */
   base_bps: number;
   /** VIP discount percentage applied (0..66.66). */
   vip_discount_pct: number;
-  /** Verified-tier discount percentage applied (0/10/20/30). */
+  /** Clearing-class discount percentage applied (0/10/20/30). */
   verified_discount_pct: number;
   /** Builder share in bps (effective_bps × 25% when routed). */
   builder_share_bps: number;

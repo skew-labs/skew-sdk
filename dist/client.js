@@ -1,19 +1,230 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SkewClient = void 0;
 const web3_js_1 = require("@solana/web3.js");
 const anchor_1 = require("@coral-xyz/anchor");
 const spl_token_1 = require("@solana/spl-token");
+const tweetnacl_1 = __importDefault(require("tweetnacl"));
 const pda_1 = require("./pda");
+const errors_1 = require("./generated/errors");
+const OptionAccount_1 = require("./generated/accounts/OptionAccount");
+const rfq_1 = require("./rfq");
 // Devnet USDC mint — overridable via SKEW_DEVNET_USDC_MINT env var.
 const DEVNET_USDC_MINT = new web3_js_1.PublicKey(process.env["SKEW_DEVNET_USDC_MINT"] ?? "4T2KU8PXd25XvMh6kzv3F7d55yPP6NcS7HemERBe97K8");
 const PM_MIN_CU_LIMIT = 400000;
 const PM_MAX_CU_LIMIT = 1000000;
 const RFQ_QUOTE_DIRECT_CU_LIMIT = 80000;
 const RFQ_QUOTE_ED25519_CU_LIMIT = 120000;
+const RFQ_TAKE_BEST_CU_LIMIT = 90000;
+const MAKER_AXE_CU_LIMIT = 110000;
+const LEGACY_CM_ACCOUNT_SIZE = 144;
+const LEGACY_RFQ_MAKER_REGISTRY_SIZE = 104;
+const RFQ_MAKER_MIN_BALANCE_LAMPORTS = 1020000000;
+const OPTION_ACCOUNT_SIZE = 288;
+const OPTION_ACCOUNT_DISCRIMINATOR_B58 = "EkCYUNaERC7";
+const DEFAULT_SKEW_WEB_URL = "https://skew-web.vercel.app";
 function estimatePmCuLimit(remainingAccountCount) {
     const count = Math.max(0, Math.floor(remainingAccountCount));
     return Math.min(PM_MAX_CU_LIMIT, Math.max(PM_MIN_CU_LIMIT, 300000 + count * 25000));
+}
+function pubkeyishToBase58(value) {
+    return value instanceof web3_js_1.PublicKey ? value.toBase58() : value;
+}
+function defaultSkewWebUrl() {
+    const env = typeof process !== "undefined"
+        ? process.env["SKEW_WEB_URL"] ?? process.env["NEXT_PUBLIC_SKEW_WEB_URL"]
+        : undefined;
+    return env && env.trim().length > 0 ? env : DEFAULT_SKEW_WEB_URL;
+}
+function apiUrl(pathname, webUrl) {
+    const base = (webUrl ?? defaultSkewWebUrl()).replace(/\/+$/, "");
+    return new URL(pathname, `${base}/`);
+}
+function setOptionalParam(url, key, value) {
+    if (value === undefined)
+        return;
+    if (typeof value === "boolean") {
+        url.searchParams.set(key, value ? "1" : "0");
+        return;
+    }
+    url.searchParams.set(key, String(value));
+}
+async function fetchJson(url, timeoutMs = 10000) {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => {
+        ctrl.abort(new DOMException(`Skew API ${url.pathname} timed out`, "TimeoutError"));
+    }, timeoutMs);
+    let res;
+    try {
+        res = await fetch(url.toString(), {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            signal: ctrl.signal,
+        });
+    }
+    catch (err) {
+        if (err instanceof DOMException && (err.name === "AbortError" || err.name === "TimeoutError")) {
+            throw new Error(`Skew API ${url.pathname} timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+    const text = await res.text();
+    let parsed;
+    try {
+        parsed = text.length > 0 ? JSON.parse(text) : {};
+    }
+    catch {
+        parsed = { error: text };
+    }
+    if (!res.ok) {
+        const message = parsed && typeof parsed === "object" && "error" in parsed
+            ? typeof parsed.error === "string"
+                ? String(parsed.error)
+                : JSON.stringify(parsed.error)
+            : `HTTP ${res.status}`;
+        throw new Error(`Skew API ${url.pathname} failed: ${message}`);
+    }
+    return parsed;
+}
+async function postJson(url, body, timeoutMs = 10000) {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => {
+        ctrl.abort(new DOMException(`Skew API ${url.pathname} timed out`, "TimeoutError"));
+    }, timeoutMs);
+    let res;
+    try {
+        res = await fetch(url.toString(), {
+            method: "POST",
+            headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+    }
+    catch (err) {
+        if (err instanceof DOMException && (err.name === "AbortError" || err.name === "TimeoutError")) {
+            throw new Error(`Skew API ${url.pathname} timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+    const text = await res.text();
+    let parsed;
+    try {
+        parsed = text.length > 0 ? JSON.parse(text) : {};
+    }
+    catch {
+        parsed = { error: text };
+    }
+    if (!res.ok) {
+        const message = parsed && typeof parsed === "object" && "error" in parsed
+            ? typeof parsed.error === "string"
+                ? String(parsed.error)
+                : JSON.stringify(parsed.error)
+            : `HTTP ${res.status}`;
+        throw new Error(`Skew API ${url.pathname} failed: ${message}`);
+    }
+    return parsed;
+}
+function payoffFromRfqSpec(args) {
+    const isPut = args.direction < 0;
+    switch (args.optionType) {
+        case 0:
+            return isPut ? "vanilla_put" : "vanilla_call";
+        case 1:
+            return isPut ? "digital_put" : "digital_call";
+        case 2:
+            return isPut ? "capped_put" : "capped_call";
+        case 3:
+            return "range_accrual";
+        case 4:
+            throw new Error("createOptionFromRfqAuction: inverse RFQs are not supported by USDC Auction RFQ v1; use Instant RFQ physical/CM lane");
+        case 5:
+            throw new Error("createOptionFromRfqAuction: inverse RFQs are not supported by USDC Auction RFQ v1; use Instant RFQ physical/CM lane");
+        default:
+            throw new Error(`Unsupported RFQ option type code: ${args.optionType}`);
+    }
+}
+function createParamsFromRfqAuctionSnapshot(snap) {
+    const underlying = (0, pda_1.indexToUnderlying)(snap.optionSpec.asset);
+    if (!underlying) {
+        throw new Error(`RFQ auction has unsupported asset index ${snap.optionSpec.asset}`);
+    }
+    const payoff = payoffFromRfqSpec({
+        optionType: snap.optionSpec.optionType,
+        direction: snap.optionSpec.direction,
+    });
+    const params = {
+        underlying,
+        payoff,
+        strike: (0, pda_1.fromOnChainStrike)(snap.optionSpec.strike),
+        expiry: new Date(Number(snap.optionSpec.expiryTs) * 1000).toISOString(),
+        notional: (0, pda_1.fromUsdcUnits)(snap.optionSpec.payoffAmountMicro),
+    };
+    if (snap.optionSpec.optionType === 2) {
+        if (snap.optionSpec.upperBound === 0n) {
+            throw new Error("createOptionFromRfqAuction: capped RFQ requires upper_bound as cap strike");
+        }
+        params.upperBound = (0, pda_1.fromOnChainStrike)(snap.optionSpec.upperBound);
+        params.extraParam = params.upperBound;
+    }
+    if (snap.optionSpec.optionType === 3) {
+        if (snap.optionSpec.upperBound === 0n) {
+            throw new Error("createOptionFromRfqAuction: range RFQ requires upper_bound");
+        }
+        params.upperBound = (0, pda_1.fromOnChainStrike)(snap.optionSpec.upperBound);
+        params.extraParam = params.upperBound;
+    }
+    return params;
+}
+function parseProgramErrorCode(text) {
+    const match = /custom program error:\s*(0x[0-9a-f]+|\d+)/i.exec(text);
+    if (!match)
+        return null;
+    const raw = match[1];
+    return raw.startsWith("0x") ? Number.parseInt(raw.slice(2), 16) : Number.parseInt(raw, 10);
+}
+function extractCustomProgramErrorCode(value) {
+    if (typeof value === "string")
+        return parseProgramErrorCode(value);
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const nested = extractCustomProgramErrorCode(item);
+            if (nested !== null)
+                return nested;
+        }
+        return null;
+    }
+    if (typeof value !== "object" || value === null)
+        return null;
+    const record = value;
+    const custom = record["Custom"];
+    if (typeof custom === "number" && Number.isInteger(custom))
+        return custom;
+    if (typeof custom === "string" && /^[0-9]+$/.test(custom))
+        return Number.parseInt(custom, 10);
+    const message = record["message"];
+    if (typeof message === "string") {
+        const parsed = parseProgramErrorCode(message);
+        if (parsed !== null)
+            return parsed;
+    }
+    for (const item of Object.values(record)) {
+        const nested = extractCustomProgramErrorCode(item);
+        if (nested !== null)
+            return nested;
+    }
+    return null;
 }
 /**
  * SkewClient — the machine gate to Skew infrastructure.
@@ -40,6 +251,14 @@ class SkewClient {
     get walletPublicKey() {
         return this.wallet.publicKey;
     }
+    /** Read-only access for high-level SDK facades that need RPC account checks. */
+    get solanaConnection() {
+        return this.connection;
+    }
+    /** Settlement mint used by default for USDC/stable flows. */
+    get usdcMintPublicKey() {
+        return this.usdcMint;
+    }
     constructor(connection, wallet, options = {}) {
         // Lazy-init: never instantiate a stub Program. Anchor 0.31's
         // `new Program(idl, provider)` calls `translateAddress(idl.address)` which
@@ -50,6 +269,7 @@ class SkewClient {
         const _programId = options.programId ? new web3_js_1.PublicKey(options.programId) : pda_1.SKEW_PROGRAM_ID;
         void _programId;
         this.usdcMint = options.usdcMint ? new web3_js_1.PublicKey(options.usdcMint) : DEVNET_USDC_MINT;
+        this.rfq = new rfq_1.SkewRfqClient(this);
         // Note: do NOT instantiate Program here. Use SkewClient.fromProgram(...)
         // to load with a real IDL.
     }
@@ -79,8 +299,49 @@ class SkewClient {
     _assertProgramLoaded() {
         this._program();
     }
+    /** Sign a transaction with the configured wallet. Used by RFQ accept flows. */
+    async signTransaction(tx) {
+        return this.wallet.signTransaction(tx);
+    }
     _collateralPolicy() {
         return (0, pda_1.findCollateralPolicyPda)()[0];
+    }
+    async _signApiMessage(message) {
+        const bytes = new TextEncoder().encode(message);
+        const walletWithPayer = this.wallet;
+        const secretKey = walletWithPayer.payer?.secretKey;
+        if (secretKey) {
+            return Buffer.from(tweetnacl_1.default.sign.detached(bytes, secretKey)).toString("base64");
+        }
+        const walletWithMessage = this.wallet;
+        if (typeof walletWithMessage.signMessage === "function") {
+            const signature = await walletWithMessage.signMessage(bytes);
+            return Buffer.from(signature).toString("base64");
+        }
+        throw new Error("SkewClient: this wallet cannot sign API messages. Use a Keypair-backed MCP/Node wallet or a wallet adapter with signMessage.");
+    }
+    _secondaryListingMessage(args) {
+        return [
+            "skew.secondary_listing.v1",
+            `option_pda=${args.optionPda}`,
+            `option_token_mint=${args.optionTokenMint}`,
+            `seller=${args.seller}`,
+            `ask_price_usdc=${args.askPriceUsdc}`,
+            `token_amount=${args.tokenAmount}`,
+            `duration_hours=${args.durationHours}`,
+            `seller_handle=${args.sellerHandle ?? ""}`,
+        ].join("\n");
+    }
+    _secondaryBuyIntentMessage(args) {
+        return [
+            "skew.secondary_buy_intent.v1",
+            `listing_id=${args.listingId}`,
+            `option_pda=${args.optionPda}`,
+            `seller=${args.seller}`,
+            `buyer=${args.buyer}`,
+            `payment_tx_sig=${args.paymentTxSig}`,
+            `ask_price_usdc=${args.askPriceUsdc}`,
+        ].join("\n");
     }
     /**
      * Read the live CollateralPolicyPda mint allowlist for this deployment.
@@ -142,6 +403,61 @@ class SkewClient {
                 `Registered mints: ${allowlist || "(none)"}. Call fetchCollateralPolicy() before routing.`);
         }
     }
+    async _requireUsdcBalance(ata, amountMicro, context) {
+        let acc;
+        try {
+            acc = await (0, spl_token_1.getAccount)(this.connection, ata, "confirmed", spl_token_1.TOKEN_PROGRAM_ID);
+        }
+        catch (err) {
+            if (err instanceof spl_token_1.TokenAccountNotFoundError ||
+                err instanceof spl_token_1.TokenInvalidAccountOwnerError) {
+                throw new Error(`${context}: buyer USDC token account is not initialized. ` +
+                    "Use the devnet faucet/top-up flow first, then submit the RFQ again.");
+            }
+            throw err;
+        }
+        if (acc.mint && !acc.mint.equals(this.usdcMint)) {
+            throw new Error(`${context}: settlement token account mint mismatch`);
+        }
+        const available = BigInt(acc.amount.toString());
+        if (available < amountMicro) {
+            const need = Number(amountMicro) / 1000000;
+            const have = Number(available) / 1000000;
+            throw new Error(`${context}: insufficient devnet USDC for RFQ escrow. ` +
+                `Need ${need.toFixed(2)} USDC, have ${have.toFixed(2)} USDC. ` +
+                "Use the devnet faucet/top-up flow first, then submit again.");
+        }
+    }
+    async _ensureClearingMemberLayout(authority = this.wallet.publicKey) {
+        const [cm] = (0, pda_1.findClearingMemberPda)(authority);
+        const info = await this.connection.getAccountInfo(cm, "confirmed");
+        if (!info || info.data.length !== LEGACY_CM_ACCOUNT_SIZE)
+            return null;
+        const tx = await this._program()
+            .methods.cmReallocV2()
+            .accounts({
+            authority,
+            cm,
+            systemProgram: web3_js_1.SystemProgram.programId,
+        })
+            .transaction();
+        return this._sendAndConfirm(tx);
+    }
+    async _ensureRfqMakerRegistryLayout(mm = this.wallet.publicKey) {
+        const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        const info = await this.connection.getAccountInfo(registry, "confirmed");
+        if (!info || info.data.length !== LEGACY_RFQ_MAKER_REGISTRY_SIZE)
+            return null;
+        const tx = await this._program()
+            .methods.rfqMakerReallocV2()
+            .accounts({
+            mm,
+            registry,
+            systemProgram: web3_js_1.SystemProgram.programId,
+        })
+            .transaction();
+        return this._sendAndConfirm(tx);
+    }
     _hamiltonRemaining() {
         return [0, 1, 2, 3, 4].map((assetIdx) => ({
             pubkey: (0, pda_1.findHamiltonPda)(assetIdx)[0],
@@ -202,8 +518,10 @@ class SkewClient {
         const [creatorCmCollateralAta] = (0, pda_1.findCmEscrowPda)(creatorCm);
         return { creatorCm, positionRegistry, creatorCmCollateralAta };
     }
-    async _settleHolderOptionalAccounts(optionPda, holder) {
-        if (holder.equals(web3_js_1.PublicKey.default) || !(await this._registryContains(holder, optionPda))) {
+    async _settleHolderOptionalAccounts(optionPda, holder, creator) {
+        if (holder.equals(web3_js_1.PublicKey.default) ||
+            (creator !== undefined && holder.equals(creator)) ||
+            !(await this._registryContains(holder, optionPda))) {
             return { holderCm: null, holderPositionRegistry: null };
         }
         const [holderCm] = (0, pda_1.findClearingMemberPda)(holder);
@@ -212,6 +530,10 @@ class SkewClient {
     }
     async _buildUntrackHeldPositionIx(optionPda, holder) {
         if (!(await this._registryContains(holder, optionPda)))
+            return null;
+        const raw = await this._fetchOption(optionPda);
+        const creator = raw.creator;
+        if (holder.equals(creator))
             return null;
         const [cm] = (0, pda_1.findClearingMemberPda)(holder);
         const [positionRegistry] = (0, pda_1.findPositionRegistryPda)(holder);
@@ -349,11 +671,14 @@ class SkewClient {
         const expiryTs = (0, pda_1.isoToUnixSeconds)(expiry);
         (0, pda_1.assertExpiryTenor)(underlying, expiryTs, { context: "create" });
         const payoffUnits = (0, pda_1.toSettlementUnits)(notional, settlementMint);
-        const upperBoundOnChain = params.upperBound ? (0, pda_1.toOnChainStrike)(params.upperBound) : 0n;
+        const rangeUpperUsd = payoff === "range_accrual" ? (params.upperBound ?? params.extraParam) : undefined;
+        const upperBoundOnChain = rangeUpperUsd === undefined ? 0n : (0, pda_1.toOnChainStrike)(rangeUpperUsd);
         // V2.1 derivations
         const assetIdx = (0, pda_1.assetEnumIndex)(underlying);
         const mapping = (0, pda_1.mapPayoffToAnchor)(payoff);
-        const directionWire = (0, pda_1.directionToI8)(params.direction ?? mapping.defaultDirection);
+        const directionWire = payoff === "range_accrual"
+            ? 0
+            : (0, pda_1.directionToI8)(params.direction ?? mapping.defaultDirection);
         const extraParam = mapping.extraParam(params);
         // V0 stamp — auto-fetch from Pyth Hermes if caller didn't supply.
         // If Hermes is unavailable, caller can still pass spotAtCreation explicitly.
@@ -425,6 +750,9 @@ class SkewClient {
      * calculation are all internal.
      */
     async buy(option, premiumUsd) {
+        return this._buyWithPremiumMicro(option, (0, pda_1.toUsdcUnits)(premiumUsd));
+    }
+    async _buyWithPremiumMicro(option, premiumMicro) {
         this._assertProgramLoaded();
         const optionPda = typeof option === "string" ? new web3_js_1.PublicKey(option) : option;
         const buyer = this.wallet.publicKey;
@@ -443,7 +771,7 @@ class SkewClient {
         const buyerOptionAta = (0, spl_token_1.getAssociatedTokenAddressSync)(optionTokenMintPda, buyer, false, spl_token_1.TOKEN_PROGRAM_ID);
         const [sigmaIvPda] = (0, pda_1.findSigmaIvPda)();
         const tx = await this._program()
-            .methods.buyOption(new anchor_1.BN((0, pda_1.toUsdcUnits)(premiumUsd).toString()))
+            .methods.buyOption(new anchor_1.BN(premiumMicro.toString()))
             .accounts({
             option: optionPda,
             buyer,
@@ -469,7 +797,27 @@ class SkewClient {
             .remainingAccounts(this._hamiltonRemaining())
             .transaction();
         const sig = await this._sendAndConfirm(tx);
-        return { txSignature: sig };
+        const after = await this.listOptions({ pda: optionPda, limit: 1 });
+        const optionSummary = after[0];
+        let buyerOptionAmount;
+        try {
+            const tokenAccount = await (0, spl_token_1.getAccount)(this.connection, buyerOptionAta, "confirmed", spl_token_1.TOKEN_PROGRAM_ID);
+            buyerOptionAmount = tokenAccount.amount.toString();
+        }
+        catch {
+            buyerOptionAmount = undefined;
+        }
+        return {
+            txSignature: sig,
+            option: optionSummary,
+            optionAddress: optionPda.toBase58(),
+            optionTokenMint: optionTokenMintPda.toBase58(),
+            buyerOptionAta: buyerOptionAta.toBase58(),
+            buyerOptionAmount,
+            buyer: buyer.toBase58(),
+            creator: creator.toBase58(),
+            holder: optionSummary?.holder,
+        };
     }
     /**
      * Settle an expired option. Permissionless — anyone can call.
@@ -496,7 +844,7 @@ class SkewClient {
         const [feeAuthority] = (0, pda_1.findFeeAuthorityPda)();
         const cmOptional = await this._settleCmOptionalAccounts(optionPda, creator);
         const collOptional = await this._settleCollateralLockOptionalAccounts(optionPda, creator);
-        const holderOptional = await this._settleHolderOptionalAccounts(optionPda, holder);
+        const holderOptional = await this._settleHolderOptionalAccounts(optionPda, holder, creator);
         const effectiveHolder = holder.equals(web3_js_1.PublicKey.default) ? creator : holder;
         const holderAta = (0, spl_token_1.getAssociatedTokenAddressSync)(settlementMint, effectiveHolder);
         const creatorAta = (0, spl_token_1.getAssociatedTokenAddressSync)(settlementMint, creator);
@@ -561,6 +909,163 @@ class SkewClient {
         const [positionRegistry] = (0, pda_1.findPositionRegistryPda)(authority);
         const authorityUsdcAta = (0, spl_token_1.getAssociatedTokenAddressSync)(this.usdcMint, authority);
         const collateralMicro = (0, pda_1.toUsdcUnits)(params.initialCollateralUsdc);
+        // -------------------------------------------------------------------
+        // Phase 7-B · F1.4 (High) — idempotent CM-register pre-fetch.
+        //
+        // The on-chain `register_clearing_member` ix uses an Anchor `init`
+        // constraint on the CM PDA, which collides with `0x0`
+        // (AccountAlreadyInUse) on the second invocation. Without an SDK
+        // pre-check, a double-click, page refresh, or simultaneous two-tab
+        // submission produced an unactionable raw error. We short-circuit on a
+        // confirmed-commitment fetch: if the PDA already exists we silently
+        // succeed and return a sentinel signature so downstream code stays
+        // idempotent. Race-condition recovery is handled below in the
+        // try/catch around `_sendAndConfirm`.
+        // -------------------------------------------------------------------
+        const existingCmInfo = await this.connection.getAccountInfo(cmPda, "confirmed");
+        if (existingCmInfo !== null) {
+            const migrationSig = existingCmInfo.data.length === LEGACY_CM_ACCOUNT_SIZE
+                ? await this._ensureClearingMemberLayout(authority)
+                : null;
+            const existingRegistryInfo = await this.connection.getAccountInfo(positionRegistry, "confirmed");
+            if (existingRegistryInfo === null) {
+                const tx = new web3_js_1.Transaction();
+                tx.add(await this._program()
+                    .methods.initPositionRegistry()
+                    .accounts({
+                    cm: cmPda,
+                    positionRegistry,
+                    authority,
+                    systemProgram: web3_js_1.SystemProgram.programId,
+                })
+                    .instruction());
+                const txSignature = await this._sendAndConfirm(tx);
+                return {
+                    cmPda,
+                    cmEscrow,
+                    positionRegistry,
+                    txSignature: migrationSig ? `${migrationSig},${txSignature}` : txSignature,
+                    alreadyRegistered: true,
+                    atasCreated: [],
+                };
+            }
+            return {
+                cmPda,
+                cmEscrow,
+                positionRegistry,
+                txSignature: migrationSig ?? "idempotent_already_registered",
+                alreadyRegistered: true,
+                atasCreated: [],
+            };
+        }
+        // -------------------------------------------------------------------
+        // Phase 7-B · F1.6 (High) — SOL pre-flight balance check.
+        //
+        // First-time CM onboarding allocates three rent-exempt accounts in a
+        // single tx:
+        //   • ClearingMemberAccount (~360 B)             ≈ 0.00307 SOL
+        //   • cm_escrow SPL TokenAccount (165 B)         ≈ 0.00204 SOL
+        //   • PositionRegistry (~1104 B; init in 2nd ix) ≈ 0.00839 SOL
+        // Plus 1 signer fee (5_000 lamports). Conservative floor =
+        // 0.0145 SOL ≈ 14_500_000 lamports. We round up to 0.02 SOL
+        // (20_000_000 lamports) to absorb future state-size growth and give
+        // the caller a clear, actionable error instead of the on-chain `0x1`
+        // (insufficient lamports for rent).
+        // -------------------------------------------------------------------
+        const MIN_SOL_LAMPORTS_FOR_CM_REGISTER = 20000000; // 0.02 SOL
+        const solBalance = await this.connection.getBalance(authority, "confirmed");
+        if (solBalance < MIN_SOL_LAMPORTS_FOR_CM_REGISTER) {
+            throw new Error(`InsufficientSolForCmRegister: authority ${authority.toBase58()} has ` +
+                `${solBalance} lamports (≈ ${(solBalance / 1e9).toFixed(6)} SOL); ` +
+                `register_clearing_member needs ≥ ${MIN_SOL_LAMPORTS_FOR_CM_REGISTER} ` +
+                `lamports (0.02 SOL) for rent-exempt CM PDA + escrow ATA + ` +
+                `PositionRegistry + tx fee. Airdrop or fund the wallet and retry.`);
+        }
+        // -------------------------------------------------------------------
+        // Phase 7-B · F1.1 (Critical) — USDC ATA idempotent init.
+        //
+        // The on-chain handler treats `authority_usdc_ata` with `mut +
+        // token::mint=usdc_mint + token::authority=authority` constraints.
+        // Anchor requires the account to ALREADY exist (it is not declared
+        // `init`); a brand-new wallet that has never touched USDC fails with
+        // error `3012` (AccountNotInitialized) before the program body runs.
+        //
+        // We detect three cases via spl-token `getAccount`:
+        //   1. Account exists, owner = authority, mint = USDC → no-op.
+        //   2. Account does not exist (TokenAccountNotFoundError) → prepend
+        //      `createAssociatedTokenAccountIdempotentInstruction` so the
+        //      onboarding tx becomes (createATA, register, initRegistry) —
+        //      atomic from the caller's POV.
+        //   3. Account exists but owner is NOT the SPL token program
+        //      (TokenInvalidAccountOwnerError) → caller has a corrupted ATA
+        //      slot; re-throw a clear error rather than silently mask it.
+        //
+        // Other mints (vault PDAs, second-counterparty ATAs) are NOT auto-
+        // initialised — the program is responsible for those.
+        // -------------------------------------------------------------------
+        const atasCreated = [];
+        let usdcAtaExists = false;
+        let usdcAtaBalanceMicro = 0n;
+        try {
+            const usdcAtaState = await (0, spl_token_1.getAccount)(this.connection, authorityUsdcAta, "confirmed", spl_token_1.TOKEN_PROGRAM_ID);
+            usdcAtaExists = true;
+            usdcAtaBalanceMicro = BigInt(usdcAtaState.amount.toString());
+        }
+        catch (err) {
+            if (err instanceof spl_token_1.TokenAccountNotFoundError) {
+                usdcAtaExists = false;
+            }
+            else if (err instanceof spl_token_1.TokenInvalidAccountOwnerError) {
+                throw new Error(`CorruptedUsdcAta: ${authorityUsdcAta.toBase58()} exists but is ` +
+                    `not owned by the SPL Token program. The wallet's USDC ATA slot ` +
+                    `is in an unexpected state — close it manually before retrying.`);
+            }
+            else {
+                // Network / parse error — surface with context, do NOT swallow.
+                throw err;
+            }
+        }
+        // -------------------------------------------------------------------
+        // Phase 7-B · F1.6 (High) — USDC pre-flight balance check.
+        //
+        // Only enforced when `initial_collateral_usdc > 0`. The SPL transfer
+        // CPI inside the on-chain handler reverts with `0x1` (insufficient
+        // funds) on a short balance — opaque to the user. We do the check
+        // here against the freshly-fetched `usdcAtaBalanceMicro` so the
+        // failure mode is obvious. If the ATA does not exist yet, the
+        // balance is necessarily 0, so any positive `collateralMicro`
+        // immediately fails this check (no point creating an empty ATA only
+        // to revert in the second ix).
+        // -------------------------------------------------------------------
+        if (collateralMicro > 0n) {
+            if (usdcAtaBalanceMicro < collateralMicro) {
+                const have = (Number(usdcAtaBalanceMicro) / 1e6).toFixed(6);
+                const need = (Number(collateralMicro) / 1e6).toFixed(6);
+                throw new Error(`InsufficientUsdcForCmRegister: authority's USDC ATA ` +
+                    `${authorityUsdcAta.toBase58()} holds $${have}, ` +
+                    `register_clearing_member requested $${need} initial collateral. ` +
+                    `${usdcAtaExists
+                        ? "Top up the ATA"
+                        : "Mint USDC into the wallet first (devnet: spl-token-faucet.com)"} and retry.`);
+            }
+        }
+        // -------------------------------------------------------------------
+        // Build the onboarding transaction. The order matters:
+        //   1. (optional) createIdempotent USDC ATA — required for new wallets.
+        //   2. register_clearing_member (CM PDA + cm_escrow init + transfer).
+        //   3. init_position_registry (PositionRegistry PDA init).
+        // The two on-chain ixs are split for BPF stack budget reasons (W6.1)
+        // but the SDK keeps them in one tx so onboarding is atomic.
+        // -------------------------------------------------------------------
+        const tx = new web3_js_1.Transaction();
+        if (!usdcAtaExists) {
+            tx.add((0, spl_token_1.createAssociatedTokenAccountIdempotentInstruction)(authority, // payer
+            authorityUsdcAta, // ata to create
+            authority, // owner
+            this.usdcMint, // mint
+            spl_token_1.TOKEN_PROGRAM_ID, spl_token_1.ASSOCIATED_TOKEN_PROGRAM_ID));
+            atasCreated.push(authorityUsdcAta);
+        }
         const registerIx = await this._program()
             .methods.registerClearingMember(new anchor_1.BN(collateralMicro.toString()))
             .accounts({
@@ -584,9 +1089,63 @@ class SkewClient {
             systemProgram: web3_js_1.SystemProgram.programId,
         })
             .instruction();
-        const tx = new web3_js_1.Transaction().add(registerIx, initRegistryIx);
-        const txSignature = await this._sendAndConfirm(tx);
-        return { cmPda, cmEscrow, positionRegistry, txSignature };
+        tx.add(registerIx, initRegistryIx);
+        // -------------------------------------------------------------------
+        // Phase 7-B · F1.4 race recovery — robust pattern (fetch → try-init
+        // → re-fetch on failure). The pre-fetch above can return null while
+        // a parallel tab's tx is in-flight; if our submit then loses the
+        // race we re-check the on-chain state and return the idempotent
+        // sentinel. Any other error (insufficient lamports, SPL revert,
+        // network) is re-thrown unchanged.
+        // -------------------------------------------------------------------
+        let txSignature;
+        try {
+            txSignature = await this._sendAndConfirm(tx);
+        }
+        catch (sendErr) {
+            const recheck = await this.connection.getAccountInfo(cmPda, "confirmed");
+            if (recheck !== null) {
+                const registryRecheck = await this.connection.getAccountInfo(positionRegistry, "confirmed");
+                if (registryRecheck === null) {
+                    const tx = new web3_js_1.Transaction();
+                    tx.add(await this._program()
+                        .methods.initPositionRegistry()
+                        .accounts({
+                        cm: cmPda,
+                        positionRegistry,
+                        authority,
+                        systemProgram: web3_js_1.SystemProgram.programId,
+                    })
+                        .instruction());
+                    const txSignature = await this._sendAndConfirm(tx);
+                    return {
+                        cmPda,
+                        cmEscrow,
+                        positionRegistry,
+                        txSignature,
+                        alreadyRegistered: true,
+                        atasCreated,
+                    };
+                }
+                return {
+                    cmPda,
+                    cmEscrow,
+                    positionRegistry,
+                    txSignature: "idempotent_already_registered",
+                    alreadyRegistered: true,
+                    atasCreated,
+                };
+            }
+            throw sendErr;
+        }
+        return {
+            cmPda,
+            cmEscrow,
+            positionRegistry,
+            txSignature,
+            alreadyRegistered: false,
+            atasCreated,
+        };
     }
     /**
      * Add USDC collateral to an existing CM escrow.
@@ -601,8 +1160,14 @@ class SkewClient {
         const [cmPda] = (0, pda_1.findClearingMemberPda)(authority);
         const [cmEscrow] = (0, pda_1.findCmEscrowPda)(cmPda);
         const authorityUsdcAta = (0, spl_token_1.getAssociatedTokenAddressSync)(this.usdcMint, authority);
+        const amountMicro = (0, pda_1.toUsdcUnits)(amountUsdc);
+        if (amountMicro <= 0n) {
+            throw new Error("cmAddCollateral: amountUsdc must be greater than zero");
+        }
+        await this._requireUsdcBalance(authorityUsdcAta, amountMicro, "cmAddCollateral");
+        await this._ensureClearingMemberLayout(authority);
         const tx = await this._program()
-            .methods.cmAddCollateral(new anchor_1.BN((0, pda_1.toUsdcUnits)(amountUsdc).toString()))
+            .methods.cmAddCollateral(new anchor_1.BN(amountMicro.toString()))
             .accounts({
             cm: cmPda,
             authority,
@@ -632,6 +1197,7 @@ class SkewClient {
         const [cmPda] = (0, pda_1.findClearingMemberPda)(authority);
         const [cmEscrow] = (0, pda_1.findCmEscrowPda)(cmPda);
         const authorityUsdcAta = (0, spl_token_1.getAssociatedTokenAddressSync)(this.usdcMint, authority);
+        await this._ensureClearingMemberLayout(authority);
         const tx = await this._program()
             .methods.cmWithdrawCollateral(new anchor_1.BN((0, pda_1.toUsdcUnits)(amountUsdc).toString()))
             .accounts({
@@ -758,6 +1324,30 @@ class SkewClient {
         const optionPda = typeof option === "string" ? new web3_js_1.PublicKey(option) : option;
         const newHolderPk = typeof newHolder === "string" ? new web3_js_1.PublicKey(newHolder) : newHolder;
         const currentHolder = this.wallet.publicKey;
+        const raw = await this._fetchOption(optionPda);
+        const creator = raw.creator;
+        const before = (await this.listOptions({ pda: optionPda, limit: 1 }))[0] ?? null;
+        if (before === null) {
+            throw new Error(`transferOption: option not found on-chain: ${optionPda.toBase58()}`);
+        }
+        if (before.holder !== currentHolder.toBase58()) {
+            throw new Error(`transferOption: configured wallet ${currentHolder.toBase58()} is not current holder ${before.holder}`);
+        }
+        if (before.state !== "Active") {
+            throw new Error(`transferOption: option state must be Active, got ${before.state}`);
+        }
+        if (before.expiryTs <= Math.floor(Date.now() / 1000)) {
+            throw new Error("transferOption: option is expired and cannot be transferred");
+        }
+        if (newHolderPk.equals(currentHolder)) {
+            throw new Error("transferOption: new_holder must differ from current holder");
+        }
+        if (newHolderPk.equals(creator)) {
+            throw new Error("transferOption cannot transfer an active PM-backed option back to its creator. " +
+                "That is a buyback/close workflow, not a holder transfer, and would leave the writer " +
+                "position registry inconsistent. Use a non-creator buyer, settle after expiry, or wait " +
+                "for the dedicated PM buyback close primitive.");
+        }
         const [optionTokenMintPda] = (0, pda_1.findOptionTokenMintPda)(optionPda);
         const currentHolderOptionAta = (0, spl_token_1.getAssociatedTokenAddressSync)(optionTokenMintPda, currentHolder, false, spl_token_1.TOKEN_PROGRAM_ID);
         const newHolderOptionAta = (0, spl_token_1.getAssociatedTokenAddressSync)(optionTokenMintPda, newHolderPk, false, spl_token_1.TOKEN_PROGRAM_ID);
@@ -781,7 +1371,40 @@ class SkewClient {
             tx.add(untrackIx);
         tx.add(transferIx);
         const txSignature = await this._sendAndConfirm(tx);
-        return { txSignature };
+        let optionReadback;
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            optionReadback = (await this.listOptions({ pda: optionPda, limit: 1 }))[0];
+            if (optionReadback?.holder === newHolderPk.toBase58()) {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        const [oldHolderPortfolio, newHolderPortfolio] = await Promise.all([
+            this.getPortfolio(currentHolder),
+            this.getPortfolio(newHolderPk),
+        ]);
+        const oldHolderPortfolioContainsOption = oldHolderPortfolio.longOptions.some((summary) => summary.pda === optionPda.toBase58());
+        const newHolderPortfolioContainsOption = newHolderPortfolio.longOptions.some((summary) => summary.pda === optionPda.toBase58());
+        const readbackErrors = [];
+        if (optionReadback?.holder !== newHolderPk.toBase58()) {
+            readbackErrors.push(`post-transfer option holder is ${optionReadback?.holder ?? "missing"}, expected ${newHolderPk.toBase58()}`);
+        }
+        if (oldHolderPortfolioContainsOption) {
+            readbackErrors.push("old holder portfolio still contains transferred option");
+        }
+        if (!newHolderPortfolioContainsOption) {
+            readbackErrors.push("new holder portfolio does not contain transferred option");
+        }
+        return {
+            txSignature,
+            readbackOk: readbackErrors.length === 0,
+            readbackErrors,
+            oldHolder: currentHolder.toBase58(),
+            newHolder: newHolderPk.toBase58(),
+            optionReadback,
+            oldHolderPortfolioContainsOption,
+            newHolderPortfolioContainsOption,
+        };
     }
     /**
      * Bundle `transfer_option` + `settle` into a single atomic tx (single-signer).
@@ -1056,6 +1679,86 @@ class SkewClient {
         const txSignature = await this._sendAndConfirm(tx);
         return { txSignature };
     }
+    /** Close a terminal RFQ auction and its zero-balance escrow ATA. */
+    async closeRfqAuction(buyer, auctionId) {
+        this._assertProgramLoaded();
+        const [auction] = (0, pda_1.findRfqAuctionPda)(buyer, auctionId);
+        const [escrowAta] = (0, pda_1.findRfqAuctionEscrowPda)(auction);
+        const tx = await this._program()
+            .methods.closeRfqAuction()
+            .accounts({
+            refundTarget: buyer,
+            auction,
+            escrowAta,
+            tokenProgram: spl_token_1.TOKEN_PROGRAM_ID,
+        })
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
+    }
+    /** Close a quote-off, non-slashable RFQ maker registry and reclaim the bond. */
+    async closeRfqMakerRegistry(mm = this.wallet.publicKey) {
+        this._assertProgramLoaded();
+        const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        const tx = await this._program()
+            .methods.closeRfqMakerRegistry()
+            .accounts({ mm, registry })
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
+    }
+    /** Close a fully-filled combo v2 receipt PDA. */
+    async closeFinalizedComboV2(comboId) {
+        this._assertProgramLoaded();
+        const buyer = this.wallet.publicKey;
+        const [intent] = (0, pda_1.findComboIntentV2Pda)(buyer, comboId);
+        const tx = await this._program()
+            .methods.closeFinalizedComboV2()
+            .accounts({ buyer, intent })
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
+    }
+    /**
+     * Conservative rent-reclaim discovery for the current wallet.
+     * Returns only closes that can be proven from cheap reads; absence from this
+     * list does not imply the account is not closeable.
+     */
+    async listRentReclaimable(authority = this.wallet.publicKey) {
+        this._assertProgramLoaded();
+        const out = [];
+        const [maker] = (0, pda_1.findRfqMakerPda)(authority);
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const registry = await this._program().account.rfqMakerRegistryPda.fetch(maker);
+            const blockers = [];
+            if (registry.slashable)
+                blockers.push("maker registry is slashable");
+            if (!registry.quoteOff)
+                blockers.push("quote_off must be enabled before close");
+            if (Number(registry.mmpWindowFillCount ?? 0) !== 0)
+                blockers.push("MMP fill window not reset");
+            if (BigInt(registry.mmpWindowPremiumMicro?.toString?.() ?? "0") !== 0n) {
+                blockers.push("MMP premium window not reset");
+            }
+            if (BigInt(registry.mmpWindowNotionalMicro?.toString?.() ?? "0") !== 0n) {
+                blockers.push("MMP notional window not reset");
+            }
+            if (blockers.length === 0) {
+                out.push({
+                    kind: "rfq_maker_registry",
+                    pda: maker,
+                    refundTarget: authority,
+                    reason: "quote-off non-slashable maker registry",
+                    blockers,
+                });
+            }
+        }
+        catch {
+            // no maker registry, nothing to reclaim
+        }
+        return out;
+    }
     /**
      * Track an option token held by this wallet as a CM long hedge.
      *
@@ -1203,6 +1906,192 @@ class SkewClient {
             collateralUsdcMicro: collateral,
             imLockedUsdcMicro: lastIm,
             freeCollateralUsdcMicro: freeCollateral,
+        };
+    }
+    /** Init the hybrid PM cache sidecar for this wallet's CM. */
+    async initPmCache(cmAuthority = this.wallet.publicKey) {
+        this._assertProgramLoaded();
+        const [cm] = (0, pda_1.findClearingMemberPda)(cmAuthority);
+        const [cache] = (0, pda_1.findCmRiskCachePda)(cmAuthority);
+        const tx = await this._program()
+            .methods.initCmRiskCache()
+            .accounts({
+            payer: this.wallet.publicKey,
+            cm,
+            cmRiskCache: cache,
+            systemProgram: web3_js_1.SystemProgram.programId,
+        })
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature, cache };
+    }
+    /** Read the hybrid PM cache sidecar without mutating chain state. */
+    async fetchPmCache(cmAuthority = this.wallet.publicKey) {
+        this._assertProgramLoaded();
+        const [pda] = (0, pda_1.findCmRiskCachePda)(cmAuthority);
+        const info = await this.connection.getAccountInfo(pda, "confirmed");
+        if (!info || info.data.length < 236) {
+            return {
+                pda,
+                initialized: false,
+                cm: null,
+                authority: cmAuthority,
+                registryHash: null,
+                registryCount: 0,
+                dirty: true,
+                dirtyReason: 0,
+                modelVersion: 0,
+                snapshotSlot: 0n,
+                snapshotTs: 0n,
+                cachedImMicro: 0n,
+                cachedMmMicro: 0n,
+                freeCollateralMicro: 0n,
+                baseImMicro: 0n,
+                scanRiskMicro: 0n,
+                boundaryMicro: 0n,
+                tailAddonMicro: 0n,
+                iccCreditMicro: 0n,
+                wrongWayAddonMicro: 0n,
+                yieldRhoAddonMicro: 0n,
+                cacheAgeSlots: null,
+            };
+        }
+        const d = info.data;
+        const readPk = (off) => new web3_js_1.PublicKey(d.subarray(off, off + 32));
+        const readU64 = (off) => d.readBigUInt64LE(off);
+        const readI64 = (off) => d.readBigInt64LE(off);
+        const currentSlot = await this.connection.getSlot("confirmed").catch(() => null);
+        const snapshotSlot = readU64(124);
+        return {
+            pda,
+            initialized: true,
+            cm: readPk(8),
+            authority: readPk(40),
+            registryHash: Buffer.from(d.subarray(72, 104)).toString("hex"),
+            registryCount: d[104] ?? 0,
+            dirty: (d[105] ?? 1) !== 0,
+            dirtyReason: d[106] ?? 0,
+            modelVersion: d.readUInt16LE(108),
+            snapshotSlot,
+            snapshotTs: readI64(132),
+            cachedImMicro: readU64(140),
+            cachedMmMicro: readU64(148),
+            freeCollateralMicro: readU64(156),
+            baseImMicro: readU64(164),
+            scanRiskMicro: readU64(172),
+            boundaryMicro: readU64(180),
+            tailAddonMicro: readU64(188),
+            iccCreditMicro: readU64(196),
+            wrongWayAddonMicro: readU64(204),
+            yieldRhoAddonMicro: readU64(212),
+            cacheAgeSlots: currentSlot == null
+                ? null
+                : BigInt(currentSlot) > snapshotSlot
+                    ? BigInt(currentSlot) - snapshotSlot
+                    : 0n,
+        };
+    }
+    /** Full-walk PM refresh that writes the cache sidecar. */
+    async refreshPmCacheFull(currentSpotUsd = 0, cmAuthority = this.wallet.publicKey) {
+        this._assertProgramLoaded();
+        const caller = this.wallet.publicKey;
+        const [cm] = (0, pda_1.findClearingMemberPda)(cmAuthority);
+        const [cache] = (0, pda_1.findCmRiskCachePda)(cmAuthority);
+        const [positionRegistry] = (0, pda_1.findPositionRegistryPda)(cmAuthority);
+        const pmRemaining = (await this._pmRemaining(cmAuthority)).filter((m) => !m.pubkey.equals(positionRegistry));
+        const tx = await this._program()
+            .methods.refreshCmRiskCacheFull(currentSpotUsd)
+            .accounts({
+            caller,
+            cm,
+            cmRiskCache: cache,
+            positionRegistry,
+            systemProgram: web3_js_1.SystemProgram.programId,
+        })
+            .remainingAccounts(pmRemaining)
+            .preInstructions([
+            web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({
+                units: estimatePmCuLimit(pmRemaining.length + 1),
+            }),
+        ])
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        const snap = await this.fetchPmCache(cmAuthority);
+        return {
+            txSignature,
+            cache,
+            collateralUsdcMicro: snap.cachedImMicro + snap.freeCollateralMicro,
+            imLockedUsdcMicro: snap.cachedImMicro,
+            freeCollateralUsdcMicro: snap.freeCollateralMicro,
+        };
+    }
+    /** Cached IM query. Fails closed if the cache is dirty/stale or registry hash mismatches. */
+    async calculateMarginCached(currentSpotUsd = 0, cmAuthority = this.wallet.publicKey) {
+        this._assertProgramLoaded();
+        const caller = this.wallet.publicKey;
+        const [cm] = (0, pda_1.findClearingMemberPda)(cmAuthority);
+        const [cache] = (0, pda_1.findCmRiskCachePda)(cmAuthority);
+        const [positionRegistry] = (0, pda_1.findPositionRegistryPda)(cmAuthority);
+        const tx = await this._program()
+            .methods.calculateMarginCached(currentSpotUsd)
+            .accounts({ caller, cm, cmRiskCache: cache, positionRegistry })
+            .preInstructions([web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({ units: 250000 })])
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        const snap = await this.fetchPmCache(cmAuthority);
+        return {
+            txSignature,
+            cache,
+            collateralUsdcMicro: snap.cachedImMicro + snap.freeCollateralMicro,
+            imLockedUsdcMicro: snap.cachedImMicro,
+            freeCollateralUsdcMicro: snap.freeCollateralMicro,
+        };
+    }
+    /**
+     * Cache-aware preview shell for agents/UI. Exact post-IM still belongs to
+     * the relay/API pricing engine; this method exposes cache freshness and can
+     * combine a caller-supplied post-IM estimate without sending a tx.
+     */
+    async previewIncrementalMargin(args = {}) {
+        const authority = args.cmAuthority ?? this.wallet.publicKey;
+        const cache = await this.fetchPmCache(authority);
+        if (!cache.initialized) {
+            return {
+                mode: "BLOCKED",
+                preImMicro: 0n,
+                postImMicro: 0n,
+                deltaImMicro: 0n,
+                freeCollateralMicro: 0n,
+                afterFillFreeMicro: 0n,
+                cacheAgeSlots: null,
+                reason: "PM cache is not initialized",
+            };
+        }
+        if (cache.dirty) {
+            return {
+                mode: "BLOCKED",
+                preImMicro: cache.cachedImMicro,
+                postImMicro: cache.cachedImMicro,
+                deltaImMicro: 0n,
+                freeCollateralMicro: cache.freeCollateralMicro,
+                afterFillFreeMicro: cache.freeCollateralMicro,
+                cacheAgeSlots: cache.cacheAgeSlots,
+                reason: `PM cache dirty (${cache.dirtyReason}); run refreshPmCacheFull`,
+            };
+        }
+        const post = args.estimatedPostImMicro ?? cache.cachedImMicro;
+        const delta = post > cache.cachedImMicro ? post - cache.cachedImMicro : 0n;
+        return {
+            mode: args.estimatedPostImMicro == null ? "CACHE" : "CACHE",
+            preImMicro: cache.cachedImMicro,
+            postImMicro: post,
+            deltaImMicro: delta,
+            freeCollateralMicro: cache.freeCollateralMicro,
+            afterFillFreeMicro: cache.freeCollateralMicro > delta ? cache.freeCollateralMicro - delta : 0n,
+            cacheAgeSlots: cache.cacheAgeSlots,
+            reason: args.estimatedPostImMicro == null
+                ? "cache snapshot only; relay/API margin-preview computes exact post-IM"
+                : undefined,
         };
     }
     /**
@@ -1386,27 +2275,455 @@ class SkewClient {
      */
     async listOptions(opts = {}) {
         this._assertProgramLoaded();
-        const accClient = this._program().account["optionAccount"];
-        if (!accClient) {
-            throw new Error("IDL not loaded — use SkewClient.fromProgram()");
+        if (opts.pda) {
+            const pda = new web3_js_1.PublicKey(pubkeyishToBase58(opts.pda));
+            const info = await this.connection.getAccountInfo(pda, "confirmed");
+            if (!info || !info.owner.equals(pda_1.SKEW_PROGRAM_ID) || info.data.length !== OPTION_ACCOUNT_SIZE) {
+                return [];
+            }
+            try {
+                const account = OptionAccount_1.OptionAccount.decode(Buffer.from(info.data));
+                const decoded = decodeOptionAccount(pda, account);
+                if (!decoded)
+                    return [];
+                return applyOptionSummaryFilters([decoded], opts);
+            }
+            catch {
+                return [];
+            }
         }
-        const raw = await accClient.all();
+        const raw = await this.connection.getProgramAccounts(pda_1.SKEW_PROGRAM_ID, {
+            commitment: "confirmed",
+            filters: [
+                {
+                    dataSize: OPTION_ACCOUNT_SIZE,
+                },
+                {
+                    memcmp: {
+                        offset: 0,
+                        bytes: OPTION_ACCOUNT_DISCRIMINATOR_B58,
+                    },
+                },
+            ],
+        });
         let summaries = [];
         for (const entry of raw) {
-            const decoded = decodeOptionAccount(entry.publicKey, entry.account);
-            if (decoded)
-                summaries.push(decoded);
+            try {
+                const account = OptionAccount_1.OptionAccount.decode(Buffer.from(entry.account.data));
+                const decoded = decodeOptionAccount(entry.pubkey, account);
+                if (decoded)
+                    summaries.push(decoded);
+            }
+            catch {
+                // Devnet contains legacy/short OptionAccount PDAs from previous IDL
+                // layouts. They must not poison inventory discovery for healthy rows.
+            }
         }
-        if (opts.underlying)
-            summaries = summaries.filter((s) => s.underlying === opts.underlying);
-        if (opts.optionType)
-            summaries = summaries.filter((s) => s.optionType === opts.optionType);
-        if (opts.state)
-            summaries = summaries.filter((s) => s.state === opts.state);
-        const sortBy = opts.sortBy ?? "createdAt";
-        summaries.sort((a, b) => sortBy === "expiry" ? b.expiryTs - a.expiryTs : b.createdAt - a.createdAt);
-        const limit = Math.max(0, Math.min(opts.limit ?? 100, 500));
-        return summaries.slice(0, limit);
+        return applyOptionSummaryFilters(summaries, opts);
+    }
+    /**
+     * List live Auction RFQs from the same public tape endpoint used by the
+     * terminal. The endpoint merges the indexer view with a bounded on-chain
+     * snapshot, so a freshly submitted auction can be discovered even when the
+     * event indexer is behind.
+     */
+    async listRfqAuctions(opts = {}) {
+        const url = apiUrl("/api/rfq-auctions", opts.webUrl);
+        setOptionalParam(url, "buyer", opts.buyer ? pubkeyishToBase58(opts.buyer) : undefined);
+        setOptionalParam(url, "asset", opts.asset);
+        setOptionalParam(url, "with_quote", opts.withQuote);
+        setOptionalParam(url, "limit", opts.limit);
+        setOptionalParam(url, "source", opts.source);
+        return fetchJson(url);
+    }
+    /**
+     * List firm/indicative quotes for one Auction RFQ PDA from the same public
+     * tape endpoint used by the terminal. If the indexer is behind, the endpoint
+     * falls back to the on-chain auction snapshot's best quote.
+     */
+    async listRfqQuotes(auction, opts = {}) {
+        const auctionPda = pubkeyishToBase58(auction);
+        const url = apiUrl(`/api/rfq-auctions/${encodeURIComponent(auctionPda)}/quotes`, opts.webUrl);
+        setOptionalParam(url, "limit", opts.limit);
+        return fetchJson(url);
+    }
+    /**
+     * List the secondary market tape from the same public endpoint used by the
+     * terminal. This is a readback surface, not an execution primitive: fills
+     * should still go through the SDK/MCP/API trade path that holds the wallet.
+     */
+    async listSecondaryListings(opts = {}) {
+        const url = apiUrl("/api/listings", opts.webUrl);
+        setOptionalParam(url, "asset", opts.asset);
+        if (opts.active !== undefined) {
+            url.searchParams.set("active", opts.active ? "true" : "false");
+        }
+        setOptionalParam(url, "minQty", opts.minQty);
+        setOptionalParam(url, "maxAsk", opts.maxAsk);
+        setOptionalParam(url, "excludeMe", opts.excludeMe ? pubkeyishToBase58(opts.excludeMe) : undefined);
+        setOptionalParam(url, "seller", opts.seller ? pubkeyishToBase58(opts.seller) : undefined);
+        setOptionalParam(url, "optionPda", opts.optionPda ? pubkeyishToBase58(opts.optionPda) : undefined);
+        if (opts.pending !== undefined) {
+            url.searchParams.set("pending", opts.pending ? "true" : "false");
+        }
+        setOptionalParam(url, "limit", opts.limit);
+        return fetchJson(url);
+    }
+    /**
+     * Post a seller-signed secondary-market discovery row. This is a tape
+     * listing, not escrow custody: the option remains in the seller wallet
+     * until the seller later signs `transferOption`.
+     */
+    async createSecondaryListing(args) {
+        const optionPda = pubkeyishToBase58(args.optionPda);
+        const optionTokenMint = args.optionTokenMint
+            ? pubkeyishToBase58(args.optionTokenMint)
+            : (0, pda_1.findOptionTokenMintPda)(new web3_js_1.PublicKey(optionPda))[0].toBase58();
+        const seller = this.wallet.publicKey.toBase58();
+        const optionReadback = (await this.listOptions({ pda: optionPda, limit: 1 }))[0] ?? null;
+        if (optionReadback === null) {
+            throw new Error(`createSecondaryListing: option not found on-chain: ${optionPda}`);
+        }
+        if (optionReadback.holder !== seller) {
+            throw new Error(`createSecondaryListing: configured wallet ${seller} is not current option holder ${optionReadback.holder}`);
+        }
+        const askPriceUsdc = Number(args.askPriceUsdc);
+        const tokenAmount = Number(args.tokenAmount ?? 1);
+        const durationHours = Number(args.durationHours ?? 24);
+        const sellerHandle = args.sellerHandle ?? null;
+        if (optionReadback.state !== "Active") {
+            throw new Error(`createSecondaryListing: option state must be Active for transfer delivery, got ${optionReadback.state}`);
+        }
+        if (optionReadback.expiryTs <= Math.floor(Date.now() / 1000)) {
+            throw new Error("createSecondaryListing: option is expired and cannot be transferred");
+        }
+        if (optionTokenMint !== optionReadback.optionTokenMint) {
+            throw new Error(`createSecondaryListing: option token mint guard mismatch: expected ${optionReadback.optionTokenMint}, got ${optionTokenMint}`);
+        }
+        if (!Number.isFinite(askPriceUsdc) || askPriceUsdc <= 0) {
+            throw new Error("createSecondaryListing: askPriceUsdc must be > 0");
+        }
+        if (!Number.isFinite(tokenAmount) || tokenAmount !== 1) {
+            throw new Error("createSecondaryListing: tokenAmount must be exactly 1 for option-token delivery");
+        }
+        if (!Number.isFinite(durationHours) || durationHours <= 0 || durationHours > 720) {
+            throw new Error("createSecondaryListing: durationHours must be in (0, 720]");
+        }
+        const listingExpiryTs = Math.floor(Date.now() / 1000 + durationHours * 3600);
+        if (listingExpiryTs >= optionReadback.expiryTs) {
+            throw new Error("createSecondaryListing: listing duration must end before option expiry");
+        }
+        const signedMessage = this._secondaryListingMessage({
+            optionPda,
+            optionTokenMint,
+            seller,
+            askPriceUsdc,
+            tokenAmount,
+            durationHours,
+            sellerHandle,
+        });
+        const signature = await this._signApiMessage(signedMessage);
+        const url = apiUrl("/api/listings", args.webUrl);
+        const response = await postJson(url, {
+            optionPda,
+            optionTokenMint,
+            seller,
+            sellerHandle,
+            askPriceUsdc,
+            tokenAmount,
+            durationHours,
+            signedMessage,
+            signature,
+        });
+        return {
+            success: true,
+            listing: response.listing,
+            option_pda: optionPda,
+            option_token_mint: optionTokenMint,
+            seller,
+            ask_price_usdc: askPriceUsdc,
+            token_amount: tokenAmount,
+            holder_verified: true,
+            option_readback: optionReadback,
+        };
+    }
+    /**
+     * Pay a secondary listing seller in devnet USDC and record a buyer-signed
+     * buy intent on the public tape. Completion still requires the seller to
+     * sign `transferOption(option, buyer)` because the current secondary lane
+     * is escrow-less discovery plus explicit option transfer.
+     */
+    async buySecondaryListing(args) {
+        const listingId = String(args.listingId);
+        const buyer = this.wallet.publicKey;
+        if (!listingId)
+            throw new Error("buySecondaryListing: listingId is required");
+        const listingUrl = apiUrl(`/api/listings/${encodeURIComponent(listingId)}`, args.webUrl);
+        const listingResponse = await fetchJson(listingUrl);
+        const listing = listingResponse.listing;
+        if (!listing) {
+            throw new Error(`buySecondaryListing: listing not found: ${listingId}`);
+        }
+        const optionPda = String(listing.option_pda);
+        const seller = String(listing.seller);
+        const askPriceUsdc = Number(listing.ask_price_usdc);
+        if (args.optionPda !== undefined) {
+            const expectedOption = pubkeyishToBase58(args.optionPda);
+            if (expectedOption !== optionPda) {
+                throw new Error(`buySecondaryListing: option guard mismatch: expected ${expectedOption}, listing has ${optionPda}`);
+            }
+        }
+        if (args.seller !== undefined) {
+            const expectedSeller = pubkeyishToBase58(args.seller);
+            if (expectedSeller !== seller) {
+                throw new Error(`buySecondaryListing: seller guard mismatch: expected ${expectedSeller}, listing has ${seller}`);
+            }
+        }
+        if (args.askPriceUsdc !== undefined && Number(args.askPriceUsdc) !== askPriceUsdc) {
+            throw new Error(`buySecondaryListing: ask guard mismatch: expected ${Number(args.askPriceUsdc)}, listing has ${askPriceUsdc}`);
+        }
+        if (listing.status !== "active") {
+            throw new Error(`buySecondaryListing: listing is ${listing.status}, not active`);
+        }
+        if (Number(listing.token_amount) !== 1) {
+            throw new Error(`buySecondaryListing: listing token_amount must be exactly 1, got ${listing.token_amount}`);
+        }
+        if (listing.seller_handle && String(listing.seller_handle).startsWith("pending:")) {
+            throw new Error("buySecondaryListing: listing already has a pending buyer");
+        }
+        if (new Date(listing.listing_expires_at).getTime() <= Date.now()) {
+            throw new Error("buySecondaryListing: listing has expired");
+        }
+        if (seller === buyer.toBase58()) {
+            throw new Error("buySecondaryListing: buyer cannot buy their own listing");
+        }
+        if (!Number.isFinite(askPriceUsdc) || askPriceUsdc <= 0) {
+            throw new Error("buySecondaryListing: askPriceUsdc must be > 0");
+        }
+        const optionReadback = (await this.listOptions({ pda: optionPda, limit: 1 }))[0] ?? null;
+        if (optionReadback === null) {
+            throw new Error(`buySecondaryListing: option not found on-chain: ${optionPda}`);
+        }
+        if (optionReadback.holder !== seller) {
+            throw new Error(`buySecondaryListing: listing seller ${seller} is not current holder ${optionReadback.holder}`);
+        }
+        if (optionReadback.state !== "Active") {
+            throw new Error(`buySecondaryListing: option state must be Active for transfer delivery, got ${optionReadback.state}`);
+        }
+        if (optionReadback.expiryTs <= Math.floor(Date.now() / 1000)) {
+            throw new Error("buySecondaryListing: option is expired and cannot be transferred");
+        }
+        if (String(listing.option_token_mint) !== optionReadback.optionTokenMint) {
+            throw new Error(`buySecondaryListing: listing option_token_mint ${listing.option_token_mint} does not match on-chain mint ${optionReadback.optionTokenMint}`);
+        }
+        if (optionReadback.creator === buyer.toBase58()) {
+            throw new Error("buySecondaryListing: option creator cannot buy this listing through transferOption. " +
+                "Creator-side buyback needs a dedicated PM close path; paying first would leave delivery blocked.");
+        }
+        const buyerAta = (0, spl_token_1.getAssociatedTokenAddressSync)(this.usdcMint, buyer);
+        const sellerPk = new web3_js_1.PublicKey(seller);
+        const sellerAta = (0, spl_token_1.getAssociatedTokenAddressSync)(this.usdcMint, sellerPk);
+        const amountMicro = BigInt(Math.round(askPriceUsdc * 1000000));
+        const buyerTokenAccount = await (0, spl_token_1.getAccount)(this.connection, buyerAta, "confirmed", spl_token_1.TOKEN_PROGRAM_ID);
+        if (buyerTokenAccount.amount < amountMicro) {
+            throw new Error(`buySecondaryListing: insufficient USDC; need ${amountMicro.toString()} micro, have ${buyerTokenAccount.amount.toString()} micro`);
+        }
+        const tx = new web3_js_1.Transaction();
+        tx.add((0, spl_token_1.createAssociatedTokenAccountIdempotentInstruction)(buyer, sellerAta, sellerPk, this.usdcMint, spl_token_1.TOKEN_PROGRAM_ID, spl_token_1.ASSOCIATED_TOKEN_PROGRAM_ID));
+        tx.add((0, spl_token_1.createTransferInstruction)(buyerAta, sellerAta, buyer, amountMicro, [], spl_token_1.TOKEN_PROGRAM_ID));
+        const paymentTxSig = await this._sendAndConfirm(tx);
+        const signedMessage = this._secondaryBuyIntentMessage({
+            listingId,
+            optionPda,
+            seller,
+            buyer: buyer.toBase58(),
+            paymentTxSig,
+            askPriceUsdc,
+        });
+        const signature = await this._signApiMessage(signedMessage);
+        const url = apiUrl(`/api/listings/${encodeURIComponent(listingId)}/buy`, args.webUrl);
+        const result = await postJson(url, {
+            buyer: buyer.toBase58(),
+            paymentTxSig,
+            optionPda,
+            seller,
+            askPriceUsdc,
+            signedMessage,
+            signature,
+        });
+        return {
+            ...result,
+            listing_readback: listing,
+        };
+    }
+    /**
+     * Create a real pre-funded OptionAccount from the terms of an Auction RFQ's
+     * current best firm quote. This is the low-CU execution bridge for local
+     * MCP demos and builder bots:
+     *
+     * 1. Buyer opens an Auction RFQ.
+     * 2. Maker submits a firm quote.
+     * 3. Maker calls this method to create/deposit the actual option matching
+     *    the auction terms.
+     * 4. Buyer calls `buy(option, premiumUsd)` using the returned premium.
+     *
+     * This method does not mutate the auction PDA, and it does not pretend that
+     * `finalize_rfq_auction` mints an option. The returned option PDA is the
+     * actual execution artifact that portfolio/readback tools must track.
+     */
+    async createOptionFromRfqAuction(args) {
+        this._assertProgramLoaded();
+        const auction = typeof args.auction === "string" ? new web3_js_1.PublicKey(args.auction) : args.auction;
+        const snap = await this.fetchRfqAuction(auction);
+        if (!snap) {
+            throw new Error(`createOptionFromRfqAuction: RFQ auction not found: ${auction.toBase58()}`);
+        }
+        if (!snap.bestQuoteMm || snap.bestQuotePremiumMicro === null || snap.bestQuoteValidUntilSlot === null) {
+            throw new Error(`createOptionFromRfqAuction: RFQ auction ${auction.toBase58()} has no firm best quote yet`);
+        }
+        if (snap.state === "Cancelled") {
+            throw new Error(`createOptionFromRfqAuction: RFQ auction ${auction.toBase58()} is cancelled`);
+        }
+        const requireBestQuoteForMaker = args.requireBestQuoteForMaker ?? true;
+        if (requireBestQuoteForMaker && !snap.bestQuoteMm.equals(this.wallet.publicKey)) {
+            throw new Error(`createOptionFromRfqAuction: configured wallet ${this.wallet.publicKey.toBase58()} is not the best-quote maker ${snap.bestQuoteMm.toBase58()}`);
+        }
+        if (args.allowExpiredQuote !== true) {
+            const currentSlot = BigInt(await this.connection.getSlot("confirmed"));
+            if (snap.bestQuoteValidUntilSlot < currentSlot) {
+                throw new Error(`createOptionFromRfqAuction: best quote expired at slot ${snap.bestQuoteValidUntilSlot.toString()}, current slot ${currentSlot.toString()}`);
+            }
+        }
+        const createParams = createParamsFromRfqAuctionSnapshot(snap);
+        createParams.simulateOnly = args.simulateOnly;
+        createParams.dryRun = args.dryRun;
+        createParams.simulate = args.simulate;
+        const created = await this.create(createParams);
+        const [optionTokenMint] = (0, pda_1.findOptionTokenMintPda)(created.address);
+        return {
+            auction: auction.toBase58(),
+            buyer: snap.buyer.toBase58(),
+            maker: this.wallet.publicKey.toBase58(),
+            quoteMm: snap.bestQuoteMm.toBase58(),
+            premiumMicro: snap.bestQuotePremiumMicro,
+            premiumUsd: (0, pda_1.fromUsdcUnits)(snap.bestQuotePremiumMicro),
+            option: created.address.toBase58(),
+            optionTokenMint: optionTokenMint.toBase58(),
+            createTx: created.createTx,
+            depositTx: created.depositTx,
+            simulated: created.simulated,
+            simulation: created.simulation,
+            createParams,
+        };
+    }
+    /**
+     * Buyer-side RFQ execution guard for the Auction RFQ -> pre-funded option
+     * bridge. The on-chain `buy_option` primitive intentionally knows only the
+     * funded option PDA and premium amount, so this SDK helper binds a buyer
+     * action back to the auction tape before sending the transaction:
+     *
+     * - configured wallet must be the RFQ buyer
+     * - current best quote maker must match the option creator
+     * - option terms must match the auction spec
+     * - exact best-quote premium is passed to `buy_option`
+     */
+    async buyOptionFromRfqAuction(args) {
+        this._assertProgramLoaded();
+        const auction = typeof args.auction === "string" ? new web3_js_1.PublicKey(args.auction) : args.auction;
+        const optionPda = typeof args.option === "string" ? new web3_js_1.PublicKey(args.option) : args.option;
+        const snap = await this.fetchRfqAuction(auction);
+        if (!snap) {
+            throw new Error(`buyOptionFromRfqAuction: RFQ auction not found: ${auction.toBase58()}`);
+        }
+        if (!snap.buyer.equals(this.wallet.publicKey)) {
+            throw new Error(`buyOptionFromRfqAuction: configured wallet ${this.wallet.publicKey.toBase58()} is not RFQ buyer ${snap.buyer.toBase58()}`);
+        }
+        if (!snap.bestQuoteMm || snap.bestQuotePremiumMicro === null || snap.bestQuoteValidUntilSlot === null) {
+            throw new Error(`buyOptionFromRfqAuction: RFQ auction ${auction.toBase58()} has no firm best quote`);
+        }
+        if (snap.state === "Cancelled") {
+            throw new Error(`buyOptionFromRfqAuction: RFQ auction ${auction.toBase58()} is cancelled`);
+        }
+        if (args.allowExpiredQuote !== true) {
+            const currentSlot = BigInt(await this.connection.getSlot("confirmed"));
+            if (snap.bestQuoteValidUntilSlot < currentSlot) {
+                throw new Error(`buyOptionFromRfqAuction: best quote expired at slot ${snap.bestQuoteValidUntilSlot.toString()}, current slot ${currentSlot.toString()}`);
+            }
+        }
+        const options = await this.listOptions({ pda: optionPda, limit: 1 });
+        const optionSummary = options[0];
+        if (!optionSummary) {
+            throw new Error(`buyOptionFromRfqAuction: option not found: ${optionPda.toBase58()}`);
+        }
+        const expected = createParamsFromRfqAuctionSnapshot(snap);
+        const expectedType = expected.payoff;
+        const expectedDirection = expectedType === "vanilla_put" ||
+            expectedType === "digital_put" ||
+            expectedType === "capped_put"
+            ? "sell"
+            : "buy";
+        const optionTypeMatches = (expectedType === "vanilla_call" || expectedType === "vanilla_put") &&
+            optionSummary.optionType === "Vanilla" ||
+            (expectedType === "digital_call" || expectedType === "digital_put") &&
+                optionSummary.optionType === "Digital" ||
+            (expectedType === "capped_call" || expectedType === "capped_put") &&
+                optionSummary.optionType === "CappedVanilla" ||
+            expectedType === "range_accrual" &&
+                optionSummary.optionType === "RangeAccrual";
+        const directionMatches = optionSummary.optionType === "RangeAccrual" || optionSummary.direction === expectedDirection;
+        const upperMatches = optionSummary.optionType !== "RangeAccrual" ||
+            Math.abs(optionSummary.upperBoundUsd - (expected.upperBound ?? 0)) < 0.000001;
+        const capMatches = optionSummary.optionType !== "CappedVanilla" ||
+            Math.abs(optionSummary.extraParamUsd - (expected.extraParam ?? 0)) < 0.000001;
+        const termsMatch = optionSummary.creator === snap.bestQuoteMm.toBase58() &&
+            optionSummary.underlying === expected.underlying &&
+            optionTypeMatches &&
+            directionMatches &&
+            Math.abs(optionSummary.strikeUsd - expected.strike) < 0.000001 &&
+            optionSummary.expiryTs === Math.floor(Date.parse(expected.expiry) / 1000) &&
+            Math.abs(optionSummary.payoffUsd - expected.notional) < 0.000001 &&
+            upperMatches &&
+            capMatches;
+        if (!termsMatch) {
+            throw new Error(`buyOptionFromRfqAuction: option ${optionPda.toBase58()} does not match RFQ auction ${auction.toBase58()} best quote terms`);
+        }
+        const result = await this._buyWithPremiumMicro(optionPda, snap.bestQuotePremiumMicro);
+        return {
+            ...result,
+            auction: auction.toBase58(),
+            buyer: snap.buyer.toBase58(),
+            maker: optionSummary.creator,
+            quoteMm: snap.bestQuoteMm.toBase58(),
+            premiumMicro: snap.bestQuotePremiumMicro,
+            premiumUsd: (0, pda_1.fromUsdcUnits)(snap.bestQuotePremiumMicro),
+            verifiedTerms: true,
+        };
+    }
+    /**
+     * Portfolio readback from the actual OptionAccount source of truth. Longs are
+     * current-holder matches; shorts are creator/writer matches. A single option
+     * can appear in both lists while the creator still holds an unsold listing,
+     * so `options` de-duplicates by PDA for receipt-style callers.
+     */
+    async getPortfolio(owner = this.wallet.publicKey) {
+        const ownerBase58 = pubkeyishToBase58(owner);
+        const [longOptions, shortOptions, clearingMember] = await Promise.all([
+            this.listOptions({ holder: ownerBase58, limit: 500 }),
+            this.listOptions({ creator: ownerBase58, limit: 500 }),
+            this.fetchClearingMember(new web3_js_1.PublicKey(ownerBase58)),
+        ]);
+        const byPda = new Map();
+        for (const option of longOptions)
+            byPda.set(option.pda, option);
+        for (const option of shortOptions)
+            byPda.set(option.pda, option);
+        return {
+            owner: ownerBase58,
+            longOptions,
+            shortOptions,
+            options: [...byPda.values()],
+            clearingMember,
+        };
     }
     async _fetchOption(pda) {
         const acc = this._program().account["optionAccount"];
@@ -1422,11 +2739,50 @@ class SkewClient {
         tx.recentBlockhash = blockhash;
         tx.feePayer = this.wallet.publicKey;
         const signed = await this.wallet.signTransaction(tx);
-        const sig = await this.connection.sendRawTransaction(signed.serialize(), {
-            skipPreflight: false,
-        });
-        await this.connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+        let sig;
+        try {
+            sig = await this.connection.sendRawTransaction(signed.serialize(), {
+                skipPreflight: false,
+            });
+        }
+        catch (err) {
+            const typed = this._typedProgramError(err);
+            if (typed)
+                throw typed;
+            throw err;
+        }
+        const confirmation = await this.connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+        if (confirmation.value.err) {
+            const logs = await this._confirmedTransactionLogs(sig);
+            const typed = this._typedProgramError(confirmation.value.err, logs);
+            if (typed)
+                throw typed;
+            const err = new Error(`Transaction ${sig} failed: ${JSON.stringify(confirmation.value.err)}`);
+            if (logs)
+                err.logs = logs;
+            throw err;
+        }
         return sig;
+    }
+    _typedProgramError(err, logs) {
+        const errWithLogs = logs ? { logs } : err;
+        const fromLogs = (0, errors_1.fromTxError)(errWithLogs, this.program?.programId ?? pda_1.SKEW_PROGRAM_ID);
+        if (fromLogs)
+            return fromLogs;
+        const code = extractCustomProgramErrorCode(err);
+        return code === null ? null : (0, errors_1.fromCode)(code, logs);
+    }
+    async _confirmedTransactionLogs(sig) {
+        try {
+            const tx = await this.connection.getTransaction(sig, {
+                commitment: "confirmed",
+                maxSupportedTransactionVersion: 0,
+            });
+            return tx?.meta?.logMessages ?? undefined;
+        }
+        catch {
+            return undefined;
+        }
     }
     async _simulateTransaction(tx) {
         const { blockhash } = await this.connection.getLatestBlockhash("confirmed");
@@ -2300,6 +3656,18 @@ class SkewClient {
         this._assertProgramLoaded();
         const mm = this.wallet.publicKey;
         const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        const existing = await this.connection.getAccountInfo(registry, "confirmed");
+        if (existing !== null) {
+            const migrationSig = existing.data.length === LEGACY_RFQ_MAKER_REGISTRY_SIZE
+                ? await this._ensureRfqMakerRegistryLayout(mm)
+                : null;
+            return { txSignature: migrationSig ?? "idempotent_already_registered", registry };
+        }
+        const lamports = await this.connection.getBalance(mm, "confirmed");
+        if (lamports < RFQ_MAKER_MIN_BALANCE_LAMPORTS) {
+            throw new Error(`registerRfqMaker: wallet needs at least ${(RFQ_MAKER_MIN_BALANCE_LAMPORTS / 1e9).toFixed(2)} SOL ` +
+                `for the 1.00 SOL maker deposit plus rent/fees; current balance ${(lamports / 1e9).toFixed(4)} SOL`);
+        }
         const tx = await this._program()
             .methods.registerRfqMaker()
             .accounts({ mm, registry, systemProgram: web3_js_1.SystemProgram.programId })
@@ -2353,6 +3721,7 @@ class SkewClient {
         this._assertProgramLoaded();
         const mm = this.wallet.publicKey;
         const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        await this._ensureRfqMakerRegistryLayout(mm);
         const tx = await this._program()
             .methods.setMakerRiskConfig({
             quoteOff: args.quoteOff ?? false,
@@ -2387,6 +3756,11 @@ class SkewClient {
             context: "registerRfqAuction",
         });
         const buyerSettlementAta = (0, spl_token_1.getAssociatedTokenAddressSync)(settlementMint, buyer);
+        const maxPremiumMicro = (0, pda_1.toUsdcUnits)(args.maxPremiumUsdc);
+        if (maxPremiumMicro <= 0n) {
+            throw new Error("registerRfqAuction: maxPremiumUsdc must be greater than zero");
+        }
+        await this._requireUsdcBalance(buyerSettlementAta, maxPremiumMicro, "registerRfqAuction");
         const rfqDirection = args.optionSpec.optionType === 3 && args.optionSpec.direction === 0
             ? 1
             : args.optionSpec.direction;
@@ -2405,8 +3779,14 @@ class SkewClient {
                 direction: rfqDirection,
                 upperBound: new anchor_1.BN(args.optionSpec.upperBound.toString()),
             },
-            maxPremiumMicro: new anchor_1.BN((0, pda_1.toUsdcUnits)(args.maxPremiumUsdc).toString()),
+            maxPremiumMicro: new anchor_1.BN(maxPremiumMicro.toString()),
             durationSlots: new anchor_1.BN(args.durationSlots.toString()),
+            // W2 #2 — block trade flag (default false).
+            isBlockTrade: args.isBlockTrade ?? false,
+            // W2 #2 — minimum size hint (default 0).
+            minimumSizeMicro: new anchor_1.BN(args.minimumSizeMicro?.toString() ?? "0"),
+            // Wave 5B — Rule 5.21 RFQ-3 minimum (default 3).
+            eligibleMakerCount: args.eligibleMakerCount ?? 3,
         })
             .accounts({
             buyer,
@@ -2441,6 +3821,7 @@ class SkewClient {
         this._assertProgramLoaded();
         const mm = this.wallet.publicKey;
         const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        await this._ensureRfqMakerRegistryLayout(mm);
         const digest = (0, pda_1.rfqQuoteDigestBytes)(args.auction, args.premiumMicro, args.validUntilSlot, mm);
         if (args.mmSignature.length !== 64) {
             throw new Error(`submitRfqQuoteSigned: mmSignature must be 64 bytes (ed25519), got ${args.mmSignature.length}`);
@@ -2492,12 +3873,16 @@ class SkewClient {
     }
     /**
      * Browser/direct RFQ quote lane. The MM wallet signs the transaction only;
-     * no detached `signMessage` digest is required. Use this from terminal UI.
+     * no detached `signMessage` digest is required. This is the terminal MM
+     * quote path. The auction can later be finalized as firm quote tape; any
+     * cleared option position still routes through Instant RFQ atomic fill with
+     * fresh buyer/MM consent.
      */
     async submitRfqQuoteDirect(args) {
         this._assertProgramLoaded();
         const mm = this.wallet.publicKey;
         const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        await this._ensureRfqMakerRegistryLayout(mm);
         const tx = await this._program()
             .methods.submitRfqQuoteTxSigned({
             premiumMicro: new anchor_1.BN(args.premiumMicro.toString()),
@@ -2516,9 +3901,19 @@ class SkewClient {
         const txSignature = await this._sendAndConfirm(tx);
         return { txSignature };
     }
-    /** Permissionless RFQ finalizer. Refunds RFQ escrow to buyer; relay atomic fill handles option mint + MM premium. */
+    /**
+     * Permissionless RFQ finalizer. Refunds RFQ escrow to buyer and records the
+     * auction result after close. Both browser tx-signed quotes and bot/HSM
+     * Ed25519 quotes are valid firm tape; cleared option execution remains the
+     * Instant RFQ atomic-fill lane.
+     */
     async finalizeRfqAuction(args) {
         this._assertProgramLoaded();
+        const snap = args.buyerUsdcAta ? null : await this.fetchRfqAuction(args.auction);
+        if (!args.buyerUsdcAta && !snap) {
+            throw new Error(`finalizeRfqAuction: RFQ auction not found: ${args.auction.toBase58()}`);
+        }
+        const buyerUsdcAta = args.buyerUsdcAta ?? (0, spl_token_1.getAssociatedTokenAddressSync)(this.usdcMint, snap.buyer);
         const [escrow] = (0, pda_1.findRfqAuctionEscrowPda)(args.auction);
         const tx = await this._program()
             .methods.finalizeRfqAuction()
@@ -2528,7 +3923,7 @@ class SkewClient {
             usdcMint: this.usdcMint,
             collateralPolicy: this._collateralPolicy(),
             escrowAta: escrow,
-            buyerUsdcAta: args.buyerUsdcAta,
+            buyerUsdcAta,
             tokenProgram: spl_token_1.TOKEN_PROGRAM_ID,
             governance: (0, pda_1.findGovernancePda)()[0],
         })
@@ -2560,25 +3955,53 @@ class SkewClient {
     }
     // ── Phase 57301 (2026-05-04) — Paradigm-style OTC primitives ────────────────
     //
-    // refresh_quote / publish_axe / update_axe / revoke_axe. The old
-    // take_best_quote client surface below is a fail-closed compatibility shim.
+    // Auction RFQ has one public launch lane:
+    //   1. `finalizeRfqAuction` records the winning quote and refunds the buyer
+    //      after close. Cleared execution hands off to Instant RFQ atomic fill.
     //
-    // Anchor agent rejected inbox 1.2 (two-way single-auction) and 1.5 (router
-    // ix) per OUTBOX_ANCHOR_*. Two-way is folded into MakerAxe.{bid,ask}_band;
-    // best-ex aggregator is client-side. See OTC_PARADIGM_PHASE_PLAN_*.md rev3.
+    // The program IDL still exposes `take_best_quote`, but the current on-chain
+    // implementation marks the auction settled without minting/novating the
+    // option and can leave premium escrow behind. Keep the SDK fail-closed until
+    // a future program release adds complete fill + close semantics.
+    //
+    // MakerAxe is the MM inventory-intent surface. It is not settlement by itself,
+    // but it is a live on-chain primitive again and must not be hidden from SDK
+    // users or terminal surfaces.
     /**
-     * Deprecated compatibility shim.
+     * Historical buyer-accept helper for Auction RFQ.
      *
-     * The current Anchor IDL no longer exposes `take_best_quote`. Do not emulate
-     * it against RFQ-auction state. Use the Instant RFQ relay lane for 1-click
-     * HIT (`buyer_accept_tx_signed` → `cm_sign` → `buyer_tx_signed` →
-     * `atomic_fill_from_relay`) or keep the
-     * auction lane as price discovery + `finalizeRfqAuction`.
+     * Launch SDK keeps this fail-closed because the current raw program path
+     * does not mint/novate a cleared option and can leave premium escrow behind.
+     * Use `finalizeRfqAuction` for auction tape/refund and Instant RFQ atomic
+     * fill for a real PM/CM option position.
      */
     async takeBestQuote(args) {
         void args;
         this._assertProgramLoaded();
-        throw new Error("take_best_quote is not in the current skew_master IDL. Use Instant RFQ relay HIT (buyer_accept_tx_signed + cm_sign + buyer_tx_signed) for click-to-fill, or finalizeRfqAuction after close_slot for the auction lane.");
+        throw new Error("takeBestQuote is disabled for the current devnet program: Auction RFQ is price discovery + firm quote tape, and cleared execution must route through Instant RFQ atomic_fill_from_relay.");
+        /*
+        const buyer = this.wallet.publicKey;
+        const [escrow] = findRfqAuctionEscrowPda(args.auction);
+        const buyerUsdcAta = args.buyerUsdcAta ?? getAssociatedTokenAddressSync(this.usdcMint, buyer);
+        const tx = await this._program()
+          .methods.takeBestQuote({
+            expectedPremiumMicro: new BN(args.expectedPremiumMicro.toString()),
+          })
+          .accounts({
+            buyer,
+            auction: args.auction,
+            usdcMint: this.usdcMint,
+            escrowAta: escrow,
+            buyerUsdcAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .preInstructions([
+            ComputeBudgetProgram.setComputeUnitLimit({ units: RFQ_TAKE_BEST_CU_LIMIT }),
+          ])
+          .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
+        */
     }
     /**
      * Deprecated compatibility shim for the removed take-and-fill relay bundle.
@@ -2586,13 +4009,55 @@ class SkewClient {
     async takeAndFillBundle(args) {
         void args;
         this._assertProgramLoaded();
-        throw new Error("take-and-fill is disabled because take_best_quote is not in the current skew_master IDL. Use Instant RFQ buyer_accept_tx_signed + cm_sign + buyer_tx_signed over RelayPayload for atomic_fill_from_relay.");
+        throw new Error("take-and-fill relay bundling is disabled. Auction RFQ is price discovery + firm quote tape; cleared execution uses Instant RFQ buyer_accept_tx_signed + cm_sign + buyer_tx_signed over RelayPayload for atomic_fill_from_relay.");
     }
-    /** Deprecated compatibility shim; current IDL does not expose refresh_quote. */
+    /** MM refreshes its current best quote before the auction closes. */
     async refreshQuote(args) {
-        void args;
         this._assertProgramLoaded();
-        throw new Error("refresh_quote is not in the current skew_master IDL. Submit a fresh quote with submitRfqQuote instead.");
+        const mm = this.wallet.publicKey;
+        const [registry] = (0, pda_1.findRfqMakerPda)(mm);
+        await this._ensureRfqMakerRegistryLayout(mm);
+        if (args.mmSignature.length !== 64) {
+            throw new Error(`refreshQuote: mmSignature must be 64 bytes (ed25519), got ${args.mmSignature.length}`);
+        }
+        const digest = (0, pda_1.rfqQuoteDigestBytes)(args.auction, args.premiumMicro, args.validUntilSlot, mm);
+        const edData = Buffer.alloc(144);
+        edData[0] = 1;
+        edData[1] = 0;
+        edData.writeUInt16LE(80, 2);
+        edData.writeUInt16LE(0xffff, 4);
+        edData.writeUInt16LE(16, 6);
+        edData.writeUInt16LE(0xffff, 8);
+        edData.writeUInt16LE(48, 10);
+        edData.writeUInt16LE(32, 12);
+        edData.writeUInt16LE(0xffff, 14);
+        mm.toBuffer().copy(edData, 16);
+        Buffer.from(digest).copy(edData, 48);
+        Buffer.from(args.mmSignature).copy(edData, 80);
+        const ed25519Ix = new web3_js_1.TransactionInstruction({
+            programId: web3_js_1.Ed25519Program.programId,
+            keys: [],
+            data: edData,
+        });
+        const submitIx = await this._program()
+            .methods.refreshQuote({
+            premiumMicro: new anchor_1.BN(args.premiumMicro.toString()),
+            makerSignature: Array.from(args.mmSignature),
+            validUntilSlot: new anchor_1.BN(args.validUntilSlot.toString()),
+        })
+            .accounts({
+            mm,
+            registry,
+            auction: args.auction,
+            ixSysvar: web3_js_1.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+            .instruction();
+        const tx = new web3_js_1.Transaction()
+            .add(web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({ units: RFQ_QUOTE_ED25519_CU_LIMIT }))
+            .add(ed25519Ix)
+            .add(submitIx);
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
     }
     // ── MakerAxe family (publish / update / revoke) ─────────────────────────
     /**
@@ -2604,21 +4069,91 @@ class SkewClient {
      * +1 = BUY only.
      */
     async publishAxe(args) {
-        void args;
         this._assertProgramLoaded();
-        throw new Error("publish_axe is not in the current skew_master IDL.");
+        const mm = this.wallet.publicKey;
+        const [axe] = (0, pda_1.findMakerAxePda)(mm, args.axeId);
+        const noteHash = args.noteHash ? Array.from(args.noteHash) : Array(32).fill(0);
+        if (noteHash.length !== 32) {
+            throw new Error(`publishAxe: noteHash must be 32 bytes, got ${noteHash.length}`);
+        }
+        const tx = await this._program()
+            .methods.publishAxe({
+            axeId: new anchor_1.BN(args.axeId.toString()),
+            asset: args.asset,
+            side: args.side,
+            optionTypeMask: args.optionTypeMask,
+            strikeBandLo: new anchor_1.BN(args.strikeBandLo.toString()),
+            strikeBandHi: new anchor_1.BN(args.strikeBandHi.toString()),
+            expiryBandLo: new anchor_1.BN(args.expiryBandLo.toString()),
+            expiryBandHi: new anchor_1.BN(args.expiryBandHi.toString()),
+            sizeMicro: new anchor_1.BN(args.sizeMicro.toString()),
+            bidPremiumBandLo: new anchor_1.BN(args.bidPremiumBandLo.toString()),
+            bidPremiumBandHi: new anchor_1.BN(args.bidPremiumBandHi.toString()),
+            askPremiumBandLo: new anchor_1.BN(args.askPremiumBandLo.toString()),
+            askPremiumBandHi: new anchor_1.BN(args.askPremiumBandHi.toString()),
+            validUntil: new anchor_1.BN(args.validUntil.toString()),
+            noteHash,
+        })
+            .accounts({
+            mm,
+            axe,
+            insuranceFund: (0, pda_1.findInsuranceFundPda)()[0],
+            systemProgram: web3_js_1.SystemProgram.programId,
+        })
+            .preInstructions([web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({ units: MAKER_AXE_CU_LIMIT })])
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature, axe };
     }
     /** Replace mutable fields on an existing axe. Owner-only. */
     async updateAxe(args) {
-        void args;
         this._assertProgramLoaded();
-        throw new Error("update_axe is not in the current skew_master IDL.");
+        const mm = this.wallet.publicKey;
+        const f = args.fields;
+        const noteHash = f.noteHash ? Array.from(f.noteHash) : Array(32).fill(0);
+        if (noteHash.length !== 32) {
+            throw new Error(`updateAxe: noteHash must be 32 bytes, got ${noteHash.length}`);
+        }
+        const tx = await this._program()
+            .methods.updateAxe({
+            axeId: new anchor_1.BN(f.axeId.toString()),
+            asset: f.asset,
+            side: f.side,
+            optionTypeMask: f.optionTypeMask,
+            strikeBandLo: new anchor_1.BN(f.strikeBandLo.toString()),
+            strikeBandHi: new anchor_1.BN(f.strikeBandHi.toString()),
+            expiryBandLo: new anchor_1.BN(f.expiryBandLo.toString()),
+            expiryBandHi: new anchor_1.BN(f.expiryBandHi.toString()),
+            sizeMicro: new anchor_1.BN(f.sizeMicro.toString()),
+            bidPremiumBandLo: new anchor_1.BN(f.bidPremiumBandLo.toString()),
+            bidPremiumBandHi: new anchor_1.BN(f.bidPremiumBandHi.toString()),
+            askPremiumBandLo: new anchor_1.BN(f.askPremiumBandLo.toString()),
+            askPremiumBandHi: new anchor_1.BN(f.askPremiumBandHi.toString()),
+            validUntil: new anchor_1.BN(f.validUntil.toString()),
+            noteHash,
+        })
+            .accounts({
+            mm,
+            axe: args.axe,
+        })
+            .preInstructions([web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({ units: MAKER_AXE_CU_LIMIT })])
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
     }
     /** Close axe PDA — rent flows back to MM. */
     async revokeAxe(axe) {
-        void axe;
         this._assertProgramLoaded();
-        throw new Error("revoke_axe is not in the current skew_master IDL.");
+        const tx = await this._program()
+            .methods.revokeAxe()
+            .accounts({
+            mm: this.wallet.publicKey,
+            axe,
+        })
+            .preInstructions([web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({ units: MAKER_AXE_CU_LIMIT })])
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
     }
     // ── Combo intent v2 (4) — 32-leg variant of register/finalize/cancel/cleanup ──
     /**
@@ -2708,27 +4243,27 @@ class SkewClient {
         return { txSignature };
     }
     // -------------------------------------------------------------------------
-    // Phase 1639 — Verified-tier ladder + LST collateral + IF deposit + VM crank
+    // Phase 1639 — clearing-class ladder + LST collateral + IF deposit + VM crank
     //
-    // Closes the SDK gaps identified in CHANGE_PLAN.md §3.1. Verified-tier
-    // ladder is the entry path to capital-efficient PM (Silver/Gold/Platinum
-    // unlock 50/85% calendar netting + 5-dim SSVI + 25-dim cross-asset).
+    // Closes the SDK gaps identified in CHANGE_PLAN.md §3.1. The clearing-class
+    // ladder is the entry path to the launch PM/fee policy. Calendar credit
+    // is disabled at launch; non-vanilla Greek credit remains audit-gated.
     // -------------------------------------------------------------------------
     /**
-     * Step the CM up to a higher Verified tier. Locks the tier-specific USDC
+     * Step the CM up to a higher clearing class. Locks the class-specific USDC
      * floor for 30 days (TIER_LOCKUP_MIN_SECONDS) — `cm.tier_lockup_collateral`
      * is subtracted from `free_collateral()` so it cannot be withdrawn, while
      * `tradable_collateral()` keeps it available for IM and first-loss default
      * waterfall semantics. Strict rank increase only.
      *
-     * Tier ranks:
-     *   0 = Standard ($0)
-     *   1 = Silver ($500K)
-     *   2 = Gold ($2M)
-     *   3 = Platinum ($10M)
+     * Compatibility ranks:
+     *   0 = M0 Segregated ($0)
+     *   1 = M1 Portfolio ($500K)
+     *   2 = M2 Cross-Asset ($2M)
+     *   3 = M3 Clearing Prime ($10M)
      *
      * @example
-     *   await skew.upgradeTier(2); // Standard/Silver → Gold
+     *   await skew.upgradeTier(2); // M0/M1 -> M2 Cross-Asset
      */
     async upgradeTier(targetRank, lst) {
         this._assertProgramLoaded();
@@ -2759,12 +4294,12 @@ class SkewClient {
         return { txSignature };
     }
     /**
-     * Step the CM down to a lower Verified tier. Releases the tier-specific
+     * Step the CM down to a lower clearing class. Releases the class-specific
      * USDC lockup back into `free_collateral`. Requires `now ≥ tier_locked_until`
      * (30 d after most recent upgrade). Strict rank decrease only.
      *
      * @example
-     *   await skew.downgradeTier(1); // Gold/Platinum → Silver
+     *   await skew.downgradeTier(1); // M2/M3 -> M1 Portfolio
      */
     async downgradeTier(targetRank, lstVault) {
         this._assertProgramLoaded();
@@ -2851,6 +4386,25 @@ class SkewClient {
                 units: estimatePmCuLimit(pmRemaining.length),
             }),
         ])
+            .transaction();
+        const txSignature = await this._sendAndConfirm(tx);
+        return { txSignature };
+    }
+    /** Cached variation-margin crank. Fails closed if cache is stale/dirty. */
+    async callVariationMarginCached(cmAuthority) {
+        this._assertProgramLoaded();
+        const [cm] = (0, pda_1.findClearingMemberPda)(cmAuthority);
+        const [cache] = (0, pda_1.findCmRiskCachePda)(cmAuthority);
+        const [positionRegistry] = (0, pda_1.findPositionRegistryPda)(cmAuthority);
+        const tx = await this._program()
+            .methods.callVariationMarginCached()
+            .accounts({
+            keeper: this.wallet.publicKey,
+            cm,
+            cmRiskCache: cache,
+            positionRegistry,
+        })
+            .preInstructions([web3_js_1.ComputeBudgetProgram.setComputeUnitLimit({ units: 250000 })])
             .transaction();
         const txSignature = await this._sendAndConfirm(tx);
         return { txSignature };
@@ -3309,7 +4863,7 @@ class SkewClient {
      *   64     bump                  (u8)
      *
      * Smaller than LstVault (105 B) — no lst_mint dimension, no tier_locked_qty
-     * (Verified-tier lockup is jitoSOL-only by design).
+     * (class lockup is jitoSOL-only by design).
      */
     async fetchNativeSolVault(user) {
         const [pda] = (0, pda_1.findNativeSolVaultPda)(user);
@@ -3410,6 +4964,12 @@ class SkewClient {
         const info = await this.connection.getAccountInfo(auction, "confirmed");
         if (!info || info.data.length < 312)
             return null;
+        if (!info.owner.equals(pda_1.SKEW_PROGRAM_ID)) {
+            throw new Error(`RFQ auction account owner mismatch: ${auction.toBase58()}`);
+        }
+        if (!info.data.subarray(0, 8).equals(RFQ_AUCTION_DISCRIMINATOR)) {
+            throw new Error(`RFQ auction account discriminator mismatch: ${auction.toBase58()}`);
+        }
         const buf = info.data;
         const stateMap = {
             0: "Open",
@@ -3519,6 +5079,7 @@ const OPTION_TYPE_VARIANTS = {
     vanillaInverse: "VanillaInverse",
     digitalInverse: "DigitalInverse",
 };
+const RFQ_AUCTION_DISCRIMINATOR = Buffer.from([126, 144, 41, 183, 184, 86, 59, 68]);
 const OPTION_STATE_VARIANTS = {
     created: "Created",
     funded: "Funded",
@@ -3531,6 +5092,12 @@ const OPTION_STATE_VARIANTS = {
 function decodeAnchorEnum(raw, table) {
     if (!raw || typeof raw !== "object")
         return null;
+    const kind = raw.kind;
+    if (typeof kind === "string") {
+        const byKind = Object.values(table).find((value) => value === kind);
+        if (byKind)
+            return byKind;
+    }
     for (const key of Object.keys(raw)) {
         const mapped = table[key];
         if (mapped)
@@ -3552,20 +5119,25 @@ function collateralPolicyKindLabel(kindCode) {
 }
 function decodeOptionAccount(pda, raw) {
     const acc = raw;
-    const optionType = decodeAnchorEnum(acc.optionType, OPTION_TYPE_VARIANTS);
+    const optionType = decodeAnchorEnum(acc.optionType ?? acc.option_type, OPTION_TYPE_VARIANTS);
     const state = decodeAnchorEnum(acc.state, OPTION_STATE_VARIANTS);
     const underlying = (0, pda_1.indexToUnderlying)(Number(acc.asset));
     if (!optionType || !state || !underlying)
         return null;
     const strikeOnChain = bnToBigint(acc.strike);
-    const upperBoundOnChain = bnToBigint(acc.upperBound);
-    const payoffAmount = bnToBigint(acc.payoffAmount);
-    const collateralLocked = bnToBigint(acc.collateralLocked);
-    const v0UsdcMicro = bnToBigint(acc.v0UsdcMicro);
-    const spotAtCreationRaw = bnToBigint(acc.spotAtCreation);
+    const upperBoundOnChain = bnToBigint(acc.upperBound ?? acc.upper_bound ?? new anchor_1.BN(0));
+    const extraParam = Number(acc.extraParam ?? acc.extra_param ?? 0);
+    const payoffAmount = bnToBigint(acc.payoffAmount ?? acc.payoff_amount ?? new anchor_1.BN(0));
+    const collateralLocked = bnToBigint(acc.collateralLocked ?? acc.collateral_locked ?? new anchor_1.BN(0));
+    const v0UsdcMicro = bnToBigint(acc.v0UsdcMicro ?? acc.v0_usdc_micro ?? new anchor_1.BN(0));
+    const spotAtCreationRaw = bnToBigint(acc.spotAtCreation ?? acc.spot_at_creation ?? new anchor_1.BN(0));
+    const settledPriceRaw = bnToBigint(acc.settledPrice ?? acc.settled_price ?? new anchor_1.BN(0));
+    const settledAtRaw = Number((acc.settledAt ?? acc.settled_at ?? new anchor_1.BN(0)).toString());
+    const metadata = acc.metadata ?? web3_js_1.PublicKey.default;
     const direction = Number(acc.direction) >= 0 ? "buy" : "sell";
     return {
         pda: pda.toBase58(),
+        optionTokenMint: (0, pda_1.findOptionTokenMintPda)(pda)[0].toBase58(),
         creator: acc.creator.toBase58(),
         holder: acc.holder.toBase58(),
         optionType,
@@ -3577,19 +5149,48 @@ function decodeOptionAccount(pda, raw) {
         strikeUsd: (0, pda_1.fromOnChainStrike)(strikeOnChain),
         upperBoundOnChain,
         upperBoundUsd: (0, pda_1.fromOnChainStrike)(upperBoundOnChain),
-        expiryTs: Number(acc.expiryTs.toString()),
+        extraParam,
+        extraParamUsd: optionType === "CappedVanilla" ? extraParam : 0,
+        expiryTs: Number((acc.expiryTs ?? acc.expiry_ts ?? new anchor_1.BN(0)).toString()),
         payoffAmount,
         payoffUsd: (0, pda_1.fromUsdcUnits)(payoffAmount),
         collateralLocked,
         collateralLockedUsd: (0, pda_1.fromUsdcUnits)(collateralLocked),
         v0UsdcMicro,
         v0Usd: (0, pda_1.fromUsdcUnits)(v0UsdcMicro),
-        sigmaAtCreation: Number(acc.sigmaAtCreation),
+        sigmaAtCreation: Number(acc.sigmaAtCreation ?? acc.sigma_at_creation ?? 0),
         spotAtCreationUsd: Number(spotAtCreationRaw) / 100000000,
         settled: Boolean(acc.settled),
-        createdAt: Number(acc.createdAt.toString()),
-        underlyingFeedId: acc.underlyingFeedId.toBase58(),
-        settlementMint: acc.settlementMint.toBase58(),
+        createdAt: Number((acc.createdAt ?? acc.created_at ?? new anchor_1.BN(0)).toString()),
+        underlyingFeedId: (acc.underlyingFeedId ?? acc.underlying_feed_id ?? web3_js_1.PublicKey.default).toBase58(),
+        settlementMint: (acc.settlementMint ?? acc.settlement_mint ?? web3_js_1.PublicKey.default).toBase58(),
+        settlementDecimals: Number(acc.settlementDecimals ?? acc.settlement_decimals ?? 6),
+        metadata: metadata.toBase58(),
+        metadataStatus: metadata.equals(web3_js_1.PublicKey.default) ? "pending" : "registered",
+        settledPriceRaw,
+        settledPriceUsd: settledPriceRaw === 0n ? null : Number(settledPriceRaw) / 100000000,
+        settledAt: settledAtRaw > 0 ? settledAtRaw : null,
     };
+}
+function applyOptionSummaryFilters(input, opts = {}) {
+    let summaries = [...input];
+    if (opts.underlying)
+        summaries = summaries.filter((s) => s.underlying === opts.underlying);
+    if (opts.optionType)
+        summaries = summaries.filter((s) => s.optionType === opts.optionType);
+    if (opts.state)
+        summaries = summaries.filter((s) => s.state === opts.state);
+    if (opts.holder) {
+        const holder = pubkeyishToBase58(opts.holder);
+        summaries = summaries.filter((s) => s.holder === holder);
+    }
+    if (opts.creator) {
+        const creator = pubkeyishToBase58(opts.creator);
+        summaries = summaries.filter((s) => s.creator === creator);
+    }
+    const sortBy = opts.sortBy ?? "createdAt";
+    summaries.sort((a, b) => sortBy === "expiry" ? b.expiryTs - a.expiryTs : b.createdAt - a.createdAt);
+    const limit = Math.max(0, Math.min(opts.limit ?? 100, 500));
+    return summaries.slice(0, limit);
 }
 //# sourceMappingURL=client.js.map

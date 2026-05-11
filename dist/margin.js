@@ -1,18 +1,17 @@
 "use strict";
-// Off-chain Verified-tier margin breakdown — calls the skew-pricing
+// Off-chain clearing-class margin breakdown — calls the skew-pricing
 // `/margin_breakdown` REST endpoint and returns the layered IM
 // computation (2-dim, 5-dim, 25-dim, calendar, regime).
 //
-// Phase 1633.B unified PM (2026-04-30): the on-chain `calculate_margin`
-// handler now runs the same closed-form ConvexHullIM 2-dim Taylor
-// envelope as this off-chain endpoint, with calendar netting bps
-// dispatched per tier (Standard 0% / Silver 50% / Gold + Platinum 85%).
-// On-chain ↔ off-chain agreement is gated to ≤ 1 bps via
-// `tier_cross_validation.rs`. Every response carries an `advisory_note`.
+// Launch PM policy (2026-05-08): on-chain `calculate_margin` and this
+// off-chain endpoint use the same conservative ConvexHullIM/floor stack.
+// Calendar credit is disabled at launch, non-vanilla Greek credit is
+// audit-gated, and ICC credit is applied once under a capped policy.
+// Every response carries an `advisory_note`.
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getMarginBreakdown = getMarginBreakdown;
 /**
- * Compute the off-chain Verified-tier margin breakdown for a candidate
+ * Compute the off-chain clearing-class margin breakdown for a candidate
  * portfolio. Does not require an Anchor connection or wallet; it's a
  * pure HTTP call against the skew-pricing service.
  *
@@ -25,7 +24,7 @@ exports.getMarginBreakdown = getMarginBreakdown;
  *     ],
  *     { regime: "Calm" }
  *   );
- *   console.log(`Verified-tier 25-dim IM: $${breakdown.im_25d_total_usd}`);
+ *   console.log(`M3 clearing IM: $${breakdown.im_25d_total_usd}`);
  */
 async function getMarginBreakdown(legs, opts = {}) {
     const url = (opts.pricingUrl ?? "https://skew-pricing.fly.dev").replace(/\/$/, "") +

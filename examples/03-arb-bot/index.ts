@@ -2,7 +2,7 @@
 export {};
 
 /**
- * 03-arb-bot — Skew vs Deribit ATM premium arbitrage scanner.
+ * 03-arb-bot — Skew external-venue ATM premium scanner.
  *
  * Round 25 rewrite — uses LIVE Skew /price endpoint (real BSM impl) + Pyth
  * Hermes spot, eliminating Round 23 dependency on phantom /iv. Compares Skew

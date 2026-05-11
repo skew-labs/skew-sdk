@@ -230,18 +230,20 @@ const PAYOFF_TABLE: Record<PayoffType, PayoffMapping> = {
     optionType: { cappedVanilla: {} },
     defaultDirection: "buy",
     extraParam: (p) => {
-      if (p.extraParam === undefined)
-        throw new Error("capped_call requires extraParam (cap strike in USD)");
-      return p.extraParam;
+      const cap = p.extraParam ?? p.upperBound;
+      if (cap === undefined)
+        throw new Error("capped_call requires extraParam or upperBound (cap strike in USD)");
+      return cap;
     },
   },
   capped_put: {
     optionType: { cappedVanilla: {} },
     defaultDirection: "sell",
     extraParam: (p) => {
-      if (p.extraParam === undefined)
-        throw new Error("capped_put requires extraParam (cap strike in USD)");
-      return p.extraParam;
+      const cap = p.extraParam ?? p.upperBound;
+      if (cap === undefined)
+        throw new Error("capped_put requires extraParam or upperBound (cap strike in USD)");
+      return cap;
     },
   },
   range_accrual: {
@@ -251,7 +253,7 @@ const PAYOFF_TABLE: Record<PayoffType, PayoffMapping> = {
       const upper = p.upperBound ?? p.extraParam;
       if (upper === undefined)
         throw new Error("range_accrual requires upperBound (or extraParam) — upper bound USD");
-      return upper;
+      return 0;
     },
   },
   // Phase 2 (2026-05-04) — Inverse family. Premium + payoff in BASE asset.
@@ -340,6 +342,8 @@ const FEE_AUTHORITY_SEED = Buffer.from("fee_authority");
 const CM_SEED = Buffer.from("cm");
 const CM_ESCROW_SEED = Buffer.from("cm_escrow");
 const POSITION_REGISTRY_SEED = Buffer.from("position_registry");
+const CM_RISK_CACHE_SEED = Buffer.from("cm_risk_cache");
+const OPTION_RISK_CACHE_SEED = Buffer.from("option_risk_cache");
 const COLLATERAL_POLICY_SEED = Buffer.from("collateral_policy");
 const MICROSTRUCTURE_SEED = Buffer.from("microstructure");
 const CROSS_ASSET_MATRIX_SEED = Buffer.from("cross_asset_matrix");
@@ -357,6 +361,8 @@ const ISOLATED_VAULT_ATA_SEED = Buffer.from("isolated_vault_ata");
 const DVOL_SEED = Buffer.from("dvol");
 // Phase 1633.G — Mainnet hardening (conditional orders, RFQ auctions, combo v2)
 const CONDITIONAL_ORDER_SEED = Buffer.from("cond_order");
+const LEGACY_RFQ_SEED = Buffer.from("rfq");
+const LEGACY_RFQ_ESCROW_SEED = Buffer.from("rfq_escrow");
 const RFQ_AUCTION_SEED = Buffer.from("rfq_auction");
 const RFQ_AUCTION_ESCROW_SEED = Buffer.from("rfq_escrow");
 const RFQ_MAKER_REGISTRY_SEED = Buffer.from("rfq_maker");
@@ -648,6 +654,25 @@ export function findPositionRegistryPda(
   );
 }
 
+/** Hybrid PM cache sidecar. Seeds: [b"cm_risk_cache", authority]. */
+export function findCmRiskCachePda(
+  authority: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([CM_RISK_CACHE_SEED, authority.toBuffer()], programId);
+}
+
+/** Per-option PM contribution cache sidecar. Seeds: [b"option_risk_cache", option]. */
+export function findOptionRiskCachePda(
+  optionPda: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [OPTION_RISK_CACHE_SEED, optionPda.toBuffer()],
+    programId,
+  );
+}
+
 /** Singleton settlement/collateral mint allowlist PDA. */
 export function findCollateralPolicyPda(programId = SKEW_PROGRAM_ID): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([COLLATERAL_POLICY_SEED], programId);
@@ -805,7 +830,7 @@ export function generateNonce(): bigint {
 
 // Pyth expo = -8 → strike in USD must be multiplied by 10^8.
 export function toOnChainStrike(usd: number): bigint {
-  return BigInt(Math.round(usd)) * 100_000_000n;
+  return BigInt(Math.round(usd * 100_000_000));
 }
 
 // Settlement mint (USDC) uses 6 decimals.
@@ -977,6 +1002,25 @@ export function findConditionalOrderPda(
     [CONDITIONAL_ORDER_SEED, authority.toBuffer(), buf],
     programId,
   );
+}
+
+/** Legacy single-MM RFQ PDA. Seeds: [b"rfq", buyer, nonce_le]. */
+export function findLegacyRfqPda(
+  buyer: PublicKey,
+  nonce: bigint,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(nonce, 0);
+  return PublicKey.findProgramAddressSync([LEGACY_RFQ_SEED, buyer.toBuffer(), buf], programId);
+}
+
+/** Legacy RFQ escrow ATA PDA. Seeds: [b"rfq_escrow", rfq]. */
+export function findLegacyRfqEscrowPda(
+  rfq: PublicKey,
+  programId = SKEW_PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LEGACY_RFQ_ESCROW_SEED, rfq.toBuffer()], programId);
 }
 
 /**

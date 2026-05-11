@@ -24,7 +24,7 @@ export interface RouteOptions {
     topN?: number;
     /** Stop after total payoffMicro accumulates to this cap. */
     notionalCapMicro?: bigint;
-    /** Deprecated no-op; auction quote execution is disabled in current RFQ v1. */
+    /** Deprecated no-op; relay-signed auction takes remain disabled. */
     viaRelay?: boolean;
 }
 export interface RouteHit {
@@ -49,12 +49,14 @@ export interface RouteResult {
     totalPayoffMicroAcquired: bigint;
 }
 /**
- * Deprecated execution helper. Kept for API compatibility so old callers fail
- * loudly instead of trying to build an instruction that is not in the IDL.
+ * Route across already-fetched Auction RFQ candidates.
  *
  * Caller is responsible for `RouterCandidate[]` construction — typically
  * fetched via `client.fetchRfqAuction(...)` per auction PDA, or from the
  * cached `/api/rfq-auctions` indexer feed.
+ *
+ * Launch behavior is fail-closed: Auction RFQ can publish/finalize a firm
+ * quote tape, but cleared execution routes through Instant RFQ.
  */
 export declare function routeToBestQuote(client: SkewClient, candidates: RouterCandidate[], opts?: RouteOptions): Promise<RouteResult>;
 //# sourceMappingURL=router.d.ts.map

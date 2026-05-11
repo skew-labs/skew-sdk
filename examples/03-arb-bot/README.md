@@ -1,4 +1,4 @@
-# 03 — Arb Bot (Skew vs Deribit ATM premium)
+# 03 — Arb Bot (external venue ATM premium)
 
 > ✅ **LIVE-VERIFIED RUN — Round 25 (2026-04-26)**
 >
@@ -21,9 +21,10 @@
 > upstream block.
 
 
-Scans Skew vs Deribit ATM 28d IV every 60s. If divergence > 100bps, places an
-RFQ on the cheaper venue. The actual cross-venue Deribit hedge is left as an
-exercise (needs Deribit API auth — the public IV feed is enough for the scan).
+Scans Skew ATM 28d IV against an external options volatility venue every 60s.
+If divergence > 100bps, places an RFQ on the cheaper venue. The actual
+cross-venue hedge is left as an exercise (needs venue API auth — the public IV
+feed is enough for the scan).
 
 ## What it shows
 

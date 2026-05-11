@@ -5,6 +5,7 @@ export type SkewCollateralSymbol = "USDC" | "wSOL" | "jitoSOL";
 export type SkewTradeLaneId =
   | "instant_rfq"
   | "auction_rfq"
+  | "maker_axe"
   | "prefunded_listing"
   | "combo_v1"
   | "combo_v2"
@@ -144,9 +145,9 @@ export const SKEW_COLLATERAL_RAILS = [
     symbol: "jitoSOL",
     decimals: 9,
     custody: "spl-token",
-    role: ["LST collateral", "SOL inverse settlement", "verified-tier lockup"],
+    role: ["LST collateral", "SOL inverse settlement", "clearing-class lockup"],
     liveLanes: ["instant_rfq", "cm_collateral"],
-    note: "Policy-gated LST rail for SOL inverse physical settlement plus Verified-tier lockup. Builders must pass the allowlisted mint and stake-pool path.",
+    note: "Policy-gated LST rail for SOL inverse physical settlement plus clearing-class lockup. Builders must pass the allowlisted mint and stake-pool path.",
   },
 ] as const satisfies readonly SkewCollateralRail[];
 
@@ -178,12 +179,12 @@ export const SKEW_TRADE_LANES = [
     summary:
       "Buyer hits a live CM quote; browser buyers sign the final fill transaction, while bot/HSM buyers may additionally sign the RelayPayload digest. CM quotes remain digest-signed.",
     note:
-      "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills. Do not emulate take_best_quote; it is not in the current IDL.",
+      "USDC is the linear PM lane. wSOL/jitoSOL are SOL-only inverse physical lanes backed by OptionCollateralLockPda. Builder shares accrue to escrow on USDC and pay directly to the builder settlement ATA on physical fills.",
   },
   {
     id: "auction_rfq",
     label: "Auction RFQ",
-    status: "keeper-assisted",
+    status: "live",
     primary: true,
     entrypoints: [
       "registerRfqMaker",
@@ -191,6 +192,7 @@ export const SKEW_TRADE_LANES = [
       "submitRfqQuoteDirect",
       "submitRfqQuote",
       "submitRfqQuoteSigned",
+      "refreshQuote",
       "finalizeRfqAuction",
       "cancelRfqAuction",
     ],
@@ -198,14 +200,28 @@ export const SKEW_TRADE_LANES = [
       "register_rfq_auction",
       "submit_rfq_quote_tx_signed",
       "submit_rfq_quote",
+      "refresh_quote",
       "finalize_rfq_auction",
       "cancel_rfq_auction",
     ],
     settlement: ["USDC"],
     summary:
-      "Buyer escrows a max premium, multiple MMs compete with ed25519-signed quotes, and finalization records the winning quote/refund state.",
+      "Buyer escrows a max premium, multiple MMs compete, and browser tx-signed or bot/HSM ed25519 quotes can be finalized/refunded after close as firm quote tape.",
     note:
-      "Auction RFQ is price discovery and finalization. Immediate execution should route through Instant RFQ atomic fill.",
+      "Auction RFQ is price discovery and firm tape at launch. The historical take_best_quote entrypoint is intentionally not exposed until it has complete option mint/close semantics. Cleared PM/CM option minting routes through Instant RFQ atomic fill.",
+  },
+  {
+    id: "maker_axe",
+    label: "Maker Axe Board",
+    status: "live",
+    primary: true,
+    entrypoints: ["publishAxe", "updateAxe", "revokeAxe"],
+    protocol: ["publish_axe", "update_axe", "revoke_axe"],
+    settlement: [],
+    summary:
+      "MMs publish, update, and revoke on-chain inventory-intent axes so traders can discover likely RFQ counterparties.",
+    note:
+      "MakerAxe is a discovery primitive, not settlement. It complements Auction RFQ and Instant RFQ rather than replacing either fill lane.",
   },
   {
     id: "prefunded_listing",
@@ -345,8 +361,9 @@ export function getSkewCapabilities(): {
   routing: {
     clickToFill: "instant_rfq";
     priceDiscovery: "auction_rfq";
+    auctionHit: "auction_rfq";
+    makerDiscovery: "maker_axe";
     prefundedBuilderPrimitive: "prefunded_listing";
-    deprecatedInstruction: "take_best_quote";
   };
 } {
   return {
@@ -361,8 +378,9 @@ export function getSkewCapabilities(): {
     routing: {
       clickToFill: "instant_rfq",
       priceDiscovery: "auction_rfq",
+      auctionHit: "auction_rfq",
+      makerDiscovery: "maker_axe",
       prefundedBuilderPrimitive: "prefunded_listing",
-      deprecatedInstruction: "take_best_quote",
     },
   };
 }

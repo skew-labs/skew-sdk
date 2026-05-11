@@ -1,0 +1,104 @@
+import { PublicKey } from "@solana/web3.js";
+import BN from "bn.js";
+import * as types from "../types";
+export interface BlockTradeTapeFields {
+    option: PublicKey;
+    buyer: PublicKey;
+    seller_cm: PublicKey;
+    block_rfq_id: BN;
+    asset: number;
+    option_type: number;
+    direction: number;
+    identity_mode: number;
+    execution_lane: number;
+    margin_mode: number;
+    risk_scope_asset: number;
+    collateral_scope: number;
+    settlement_mint: PublicKey;
+    notional_micro: BN;
+    premium: BN;
+    filled_at: BN;
+    is_block_trade: number;
+}
+export interface BlockTradeTapeJSON {
+    option: string;
+    buyer: string;
+    seller_cm: string;
+    block_rfq_id: string;
+    asset: number;
+    option_type: number;
+    direction: number;
+    identity_mode: number;
+    execution_lane: number;
+    margin_mode: number;
+    risk_scope_asset: number;
+    collateral_scope: number;
+    settlement_mint: string;
+    notional_micro: string;
+    premium: string;
+    filled_at: string;
+    is_block_trade: number;
+}
+export declare class BlockTradeTape {
+    readonly option: PublicKey;
+    readonly buyer: PublicKey;
+    readonly seller_cm: PublicKey;
+    readonly block_rfq_id: BN;
+    readonly asset: number;
+    readonly option_type: number;
+    readonly direction: number;
+    readonly identity_mode: number;
+    readonly execution_lane: number;
+    readonly margin_mode: number;
+    readonly risk_scope_asset: number;
+    readonly collateral_scope: number;
+    readonly settlement_mint: PublicKey;
+    readonly notional_micro: BN;
+    readonly premium: BN;
+    readonly filled_at: BN;
+    readonly is_block_trade: number;
+    constructor(fields: BlockTradeTapeFields);
+    static layout(property?: string): any;
+    static fromDecoded(obj: any): types.BlockTradeTape;
+    static toEncodable(fields: BlockTradeTapeFields): {
+        option: PublicKey;
+        buyer: PublicKey;
+        seller_cm: PublicKey;
+        block_rfq_id: BN;
+        asset: number;
+        option_type: number;
+        direction: number;
+        identity_mode: number;
+        execution_lane: number;
+        margin_mode: number;
+        risk_scope_asset: number;
+        collateral_scope: number;
+        settlement_mint: PublicKey;
+        notional_micro: BN;
+        premium: BN;
+        filled_at: BN;
+        is_block_trade: number;
+    };
+    toJSON(): BlockTradeTapeJSON;
+    static fromJSON(obj: BlockTradeTapeJSON): BlockTradeTape;
+    toEncodable(): {
+        option: PublicKey;
+        buyer: PublicKey;
+        seller_cm: PublicKey;
+        block_rfq_id: BN;
+        asset: number;
+        option_type: number;
+        direction: number;
+        identity_mode: number;
+        execution_lane: number;
+        margin_mode: number;
+        risk_scope_asset: number;
+        collateral_scope: number;
+        settlement_mint: PublicKey;
+        notional_micro: BN;
+        premium: BN;
+        filled_at: BN;
+        is_block_trade: number;
+    };
+}
+//# sourceMappingURL=BlockTradeTape.d.ts.map

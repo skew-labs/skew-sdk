@@ -1,0 +1,81 @@
+import { PublicKey, Connection } from "@solana/web3.js";
+import BN from "bn.js";
+import * as types from "../types";
+export interface ClearingMemberAccountFields {
+    authority: PublicKey;
+    bump: number;
+    registered_at: BN;
+    collateral: BN;
+    if_contribution: BN;
+    net_notional_long: BN;
+    net_notional_short: BN;
+    positions_count: number;
+    last_margin_check: BN;
+    under_liquidation: boolean;
+    kyc_passed: boolean;
+    last_im_micro: BN;
+    tier: types.VerifiedTierKind;
+    tier_locked_until: BN;
+    tier_lockup_collateral: BN;
+    withdraw_24h_total_micro: BN;
+    last_withdraw_window_start_ts: BN;
+    total_pm_locked_micro: BN;
+    whitelist_count: number;
+    _whitelist_padding: Array<number>;
+    whitelist: Array<PublicKey>;
+}
+export interface ClearingMemberAccountJSON {
+    authority: string;
+    bump: number;
+    registered_at: string;
+    collateral: string;
+    if_contribution: string;
+    net_notional_long: string;
+    net_notional_short: string;
+    positions_count: number;
+    last_margin_check: string;
+    under_liquidation: boolean;
+    kyc_passed: boolean;
+    last_im_micro: string;
+    tier: types.VerifiedTierJSON;
+    tier_locked_until: string;
+    tier_lockup_collateral: string;
+    withdraw_24h_total_micro: string;
+    last_withdraw_window_start_ts: string;
+    total_pm_locked_micro: string;
+    whitelist_count: number;
+    _whitelist_padding: Array<number>;
+    whitelist: Array<string>;
+}
+export declare class ClearingMemberAccount {
+    readonly authority: PublicKey;
+    readonly bump: number;
+    readonly registered_at: BN;
+    readonly collateral: BN;
+    readonly if_contribution: BN;
+    readonly net_notional_long: BN;
+    readonly net_notional_short: BN;
+    readonly positions_count: number;
+    readonly last_margin_check: BN;
+    readonly under_liquidation: boolean;
+    readonly kyc_passed: boolean;
+    readonly last_im_micro: BN;
+    readonly tier: types.VerifiedTierKind;
+    readonly tier_locked_until: BN;
+    readonly tier_lockup_collateral: BN;
+    readonly withdraw_24h_total_micro: BN;
+    readonly last_withdraw_window_start_ts: BN;
+    readonly total_pm_locked_micro: BN;
+    readonly whitelist_count: number;
+    readonly _whitelist_padding: Array<number>;
+    readonly whitelist: Array<PublicKey>;
+    static readonly discriminator: Buffer<ArrayBuffer>;
+    static readonly layout: any;
+    constructor(fields: ClearingMemberAccountFields);
+    static fetch(c: Connection, address: PublicKey, programId?: PublicKey): Promise<ClearingMemberAccount | null>;
+    static fetchMultiple(c: Connection, addresses: PublicKey[], programId?: PublicKey): Promise<Array<ClearingMemberAccount | null>>;
+    static decode(data: Buffer): ClearingMemberAccount;
+    toJSON(): ClearingMemberAccountJSON;
+    static fromJSON(obj: ClearingMemberAccountJSON): ClearingMemberAccount;
+}
+//# sourceMappingURL=ClearingMemberAccount.d.ts.map

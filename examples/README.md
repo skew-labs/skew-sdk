@@ -7,7 +7,7 @@ SDK + a funded keypair. Each is < 100 lines and demonstrates one capability.
 |---|---|---|---|
 | 01 | [`buy-vanilla-call`](./01-buy-vanilla-call) | ✅ **SDK live** (needs ≥0.1 SOL + ≥$1k USDC in wallet) | Create + buy a BTC vanilla call in 4 SDK calls |
 | 02 | [`mm-bot`](./02-mm-bot) | ✅ **Live e2e verified Round 22** | Self-onboarding MM bot — BSM + 1.5× spread, WebSocket RFQ |
-| 03 | [`arb-bot`](./03-arb-bot) | ✅ **Round 25 — runs end-to-end** (Pyth + Deribit live; Skew `/price` in fallback mode) | Skew vs Deribit ATM premium scanner |
+| 03 | [`arb-bot`](./03-arb-bot) | ✅ **Round 25 — runs end-to-end** (Pyth + external venue vol live; Skew `/price` in fallback mode) | External-venue ATM premium scanner |
 | 04 | [`settler-bot`](./04-settler-bot) | ✅ **Round 28** — direct anchor scan, layout-resilient, 170 OptionAccount discovered live | Auto-settle expired options |
 | 05 | [`delta-hedge-bot`](./05-delta-hedge-bot) | ❌ **REST `/v1/options/greeks` not deployed** + Jupiter integration stubbed | Portfolio delta-neutral maintenance |
 

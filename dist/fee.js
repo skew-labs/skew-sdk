@@ -1,7 +1,7 @@
 "use strict";
 // Off-chain fee estimator — calls the skew-pricing `/estimate_fee` REST
 // endpoint and returns the v5.1 effective fee breakdown for a candidate
-// trade (VIP × Verified-tier × Builder).
+// trade (VIP x clearing-class x Builder).
 //
 // The on-chain `compute_effective_fee_bps` is bit-identical with this
 // preview when the inputs match; integrators should still rely on the

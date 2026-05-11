@@ -1,0 +1,1 @@
+{"version":3,"file":"callVariationMargin.d.ts","sourceRoot":"","sources":["../../../src/generated/instructions/callVariationMargin.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,sBAAsB,EAAE,SAAS,EAAe,MAAM,iBAAiB,CAAA;AAMhF,MAAM,WAAW,2BAA2B;IAC1C,MAAM,EAAE,SAAS,CAAA;IACjB,EAAE,EAAE,SAAS,CAAA;CACd;AAED,wBAAgB,mBAAmB,CACjC,QAAQ,EAAE,2BAA2B,EACrC,SAAS,GAAE,SAAsB,0BAUlC"}

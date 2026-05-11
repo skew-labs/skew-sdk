@@ -61,12 +61,34 @@ export type {
   CollateralPolicyEntrySnapshot,
   CollateralPolicySnapshot,
   MarginCalcResult,
+  PmCacheMode,
+  PmCacheSnapshot,
+  IncrementalMarginPreview,
+  RentReclaimKind,
+  RentReclaimableItem,
   Underlying,
   PayoffType,
   Direction,
   OptionType,
   OptionState,
   ListOptionsOpts,
+  ListRfqAuctionsOpts,
+  RfqAuctionIndexQuote,
+  RfqAuctionIndexResponse,
+  RfqAuctionIndexRow,
+  RfqQuoteTapeResponse,
+  RfqQuoteTapeRow,
+  CreateFromRfqAuctionResult,
+  BuyFromRfqAuctionResult,
+  PortfolioSnapshot,
+  ListSecondaryListingsOpts,
+  CreateSecondaryListingArgs,
+  CreateSecondaryListingResult,
+  BuySecondaryListingArgs,
+  BuySecondaryListingResult,
+  SecondaryListingIndexResponse,
+  SecondaryListingIndexRow,
+  SecondaryListingOptionSummary,
   OptionSummary,
   // Phase 1635-1637 — off-chain harness types
   IsolatedVaultSnapshot,
@@ -117,6 +139,8 @@ export {
   findClearingMemberPda,
   findCmEscrowPda,
   findPositionRegistryPda,
+  findCmRiskCachePda,
+  findOptionRiskCachePda,
   findCollateralPolicyPda,
   findVolumeTrackerPda,
   findFeeConfigPda,
@@ -161,6 +185,8 @@ export {
   findComboEscrowPda,
   // Phase 1633.G — Mainnet hardening (conditional / RFQ / combo v2)
   findConditionalOrderPda,
+  findLegacyRfqPda,
+  findLegacyRfqEscrowPda,
   findRfqAuctionPda,
   findRfqAuctionEscrowPda,
   findRfqMakerPda,
@@ -187,6 +213,7 @@ export {
   findAuctionEscrowPda,
 } from "./pda";
 export type { PayoffMapping, StandardTenorDays, AssertExpiryTenorOptions } from "./pda";
+export * as SkewProgramErrors from "./generated/errors";
 export { getMarginBreakdown } from "./margin";
 export type {
   MarginBreakdownLeg,
@@ -201,3 +228,24 @@ export type {
   EstimateFeeOptions,
   EstimateFeeParams,
 } from "./fee";
+export {
+  SkewRfqClient,
+  SkewRfqSession,
+} from "./rfq";
+export type {
+  SkewRfqAcceptOptions,
+  SkewRfqBuiltRequest,
+  SkewRfqExpiryInput,
+  SkewRfqFillMarginReadback,
+  SkewRfqFillPortfolioReadback,
+  SkewRfqFillResult,
+  SkewRfqMakerQuote,
+  SkewRfqMakerRequest,
+  SkewRfqMakerServeArgs,
+  SkewRfqMakerServeResult,
+  SkewRfqOraclePreflight,
+  SkewRfqQuote,
+  SkewRfqRequestArgs,
+  SkewRfqStatus,
+  SkewRfqWaitOptions,
+} from "./rfq";
