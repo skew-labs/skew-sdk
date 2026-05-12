@@ -1,3 +1,4 @@
+import type { Underlying } from "./types";
 export type SkewCollateralSymbol = "USDC" | "wSOL" | "jitoSOL";
 export type SkewTradeLaneId = "instant_rfq" | "auction_rfq" | "maker_axe" | "prefunded_listing" | "combo_v1" | "combo_v2" | "conditional_oco" | "builder_routing" | "series_listing" | "cm_collateral";
 export interface SkewCollateralRail {
@@ -21,6 +22,7 @@ export interface SkewTradeLaneCapability {
 }
 export interface SkewTenorPolicy {
     onChainBucketsDays: readonly number[];
+    allowedTenorsByUnderlying: Record<Underlying, readonly number[]>;
     toleranceSeconds: number;
     minimumBucketDays: number;
     note: string;
@@ -38,9 +40,16 @@ export declare const SKEW_ASSET_PAYOFFS: {
 };
 export declare const SKEW_TENOR_POLICY: {
     readonly onChainBucketsDays: readonly [1, 7, 14, 28, 90];
+    readonly allowedTenorsByUnderlying: {
+        readonly BTC: readonly [1, 7, 14, 28, 90];
+        readonly ETH: readonly [1, 7, 14, 28, 90];
+        readonly SOL: readonly [1, 7, 14, 28, 90];
+        readonly XRP: readonly [7, 14, 28];
+        readonly HYPE: readonly [1, 7, 14, 28];
+    };
     readonly toleranceSeconds: 3600;
     readonly minimumBucketDays: 1;
-    readonly note: "Live on-chain create/fill paths require expiry to land inside one of the standard asset tenor buckets, with ±1h tolerance. Sub-1d binaries are intentionally not enabled in the current deployment.";
+    readonly note: "Live on-chain create/fill paths require expiry to land inside the asset's allowed tenor buckets, with +/-1h tolerance. BTC/ETH/SOL accept 1d/7d/14d/28d/90d; XRP accepts 7d/14d/28d; HYPE accepts 1d/7d/14d/28d. Sub-1d binaries are intentionally not enabled in the current deployment.";
 };
 export declare const SKEW_COLLATERAL_RAILS: readonly [{
     readonly symbol: "USDC";

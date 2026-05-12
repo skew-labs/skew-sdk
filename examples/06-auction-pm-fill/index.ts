@@ -15,6 +15,7 @@ import nacl from "tweetnacl";
 import {
   SkewClient,
   fetchPythSpotUsd,
+  resolvePythFeed,
   type PayoffType,
   type Underlying,
 } from "@skew-labs/sdk";
@@ -44,7 +45,27 @@ const STRIKE_STEP_USD: Record<Underlying, number> = {
 
 function roundToStrikeGrid(asset: Underlying, value: number): number {
   const step = STRIKE_STEP_USD[asset];
-  return Math.round(value / step) * step;
+  const rounded = Math.round(value / step) * step;
+  const decimals = step < 1 ? String(step).split(".")[1]?.length ?? 0 : 0;
+  return Number(rounded.toFixed(decimals));
+}
+
+async function readRfqPreflightSpot(
+  connection: Connection,
+  asset: Underlying,
+): Promise<{ source: "devnet-pyth" | "hermes"; spotUsd: number }> {
+  const feed = resolvePythFeed(asset);
+  const info = await connection.getAccountInfo(feed, "confirmed").catch(() => null);
+  const data = info?.data;
+  if (data && data.length >= 104 && data.readUInt32LE(0) === 0xa1b2c3d4) {
+    const expo = data.readInt32LE(20);
+    const price = Number(data.readBigInt64LE(48));
+    const spotUsd = price * Math.pow(10, expo);
+    if (Number.isFinite(spotUsd) && spotUsd > 0) {
+      return { source: "devnet-pyth", spotUsd };
+    }
+  }
+  return { source: "hermes", spotUsd: await fetchPythSpotUsd(asset) };
 }
 
 async function main(): Promise<void> {
@@ -62,8 +83,12 @@ async function main(): Promise<void> {
 
   const asset = (process.env.ASSET ?? "BTC").toUpperCase() as Underlying;
   const payoff = (process.env.PAYOFF ?? "vanilla_call") as PayoffType;
-  const spot = await fetchPythSpotUsd(asset);
-  const defaultStrike = roundToStrikeGrid(asset, payoff.includes("put") ? spot * 1.1 : spot * 0.9);
+  const hermesSpot = await fetchPythSpotUsd(asset);
+  const preflightSpot = await readRfqPreflightSpot(connection, asset);
+  const defaultStrike = roundToStrikeGrid(
+    asset,
+    payoff.includes("put") ? preflightSpot.spotUsd * 1.1 : preflightSpot.spotUsd * 0.9,
+  );
   const strike = Number(process.env.STRIKE ?? defaultStrike);
   const notional = Number(process.env.NOTIONAL_USD ?? 1_000);
   const maxPremiumUsd = Number(process.env.MAX_PREMIUM_USD ?? 100);
@@ -72,7 +97,17 @@ async function main(): Promise<void> {
 
   console.log("buyer", buyer.walletPublicKey.toBase58());
   console.log("maker", maker.walletPublicKey.toBase58());
-  console.log("request", { asset, payoff, spot: Number(spot.toFixed(2)), strike, notional, maxPremiumUsd, makerPremiumUsd });
+  console.log("request", {
+    asset,
+    payoff,
+    hermesSpot: Number(hermesSpot.toFixed(2)),
+    preflightSource: preflightSpot.source,
+    preflightSpot: Number(preflightSpot.spotUsd.toFixed(2)),
+    strike,
+    notional,
+    maxPremiumUsd,
+    makerPremiumUsd,
+  });
 
   const makerLoop = maker.rfq.maker.serve({
     premiumUsd: makerPremiumUsd,

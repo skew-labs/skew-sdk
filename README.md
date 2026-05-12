@@ -3,7 +3,7 @@
 TypeScript SDK for Skew — the venue-only Solana on-chain OTC options
 protocol. Devnet launch-ready, audit-gated.
 
-Current package version: **0.7.7** (top-level snapshot under
+Current package version: **0.7.8** (top-level snapshot under
 [`/README.md`](../../README.md)). Generated from the Anchor 0.31.1 IDL of
 `skew-master` (123 ix · `skew_master.so` 2,398,832 B · devnet program
 `3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK`).
@@ -282,15 +282,24 @@ const preview = await skew.create({
 console.log(preview.simulation);
 ```
 
-Live create/fill paths require expiry to land on a standard asset tenor bucket:
-`1d`, `7d`, `14d`, `28d`, or `90d` from the transaction clock, with ±1h
-tolerance. Shorter binaries are not enabled in the current deployment. Bots
-should use `expiryFromTenorDays(1 | 7 | 14 | 28 | 90)` for ISO fields,
-`expiryTsFromTenorDays(...)` for raw Anchor `expiryTs: bigint` structs, or call
+Live create/fill paths require expiry to land on the asset's allowed tenor
+bucket, with +/-1h tolerance:
+
+| Asset | Live RFQ/create tenor buckets |
+|---|---|
+| BTC | 1d / 7d / 14d / 28d / 90d |
+| ETH | 1d / 7d / 14d / 28d / 90d |
+| SOL | 1d / 7d / 14d / 28d / 90d |
+| XRP | 7d / 14d / 28d |
+| HYPE | 1d / 7d / 14d / 28d |
+
+Shorter binaries are not enabled in the current deployment. Bots should use
+`expiryFromTenorDays(1 | 7 | 14 | 28 | 90)` for ISO fields,
+`expiryTsFromTenorDays(...)` for raw Anchor `expiryTs: bigint` structs, and call
 `assertExpiryTenor(asset, expiryTs)` before sending. The SDK runs the same
-preflight in `create()` and `registerRfqAuction()`, so invalid tenors and
-millisecond-vs-second mistakes fail with a local error instead of an Anchor
-simulation label such as `6001`.
+preflight in `create()` and `registerRfqAuction()`, so unsupported asset/tenor
+pairs and millisecond-vs-second mistakes fail with a local error instead of an
+Anchor simulation label such as `6001`.
 
 That's the happy path. The other ~86 methods exist because real trading needs collateral top-ups, transfers, cancellations, multi-leg combos, isolated margin, liquidations, conditional orders (SL / TP / OCO), escrow-aware RFQ auctions with ed25519-verified MM quotes, 32-leg combo intents, secondary-market Dutch auctions, builder-code revenue share, series-listing keepers, M-mode collateral lockup, and the long tail of bookkeeping the on-chain program enforces.
 

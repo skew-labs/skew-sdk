@@ -63,9 +63,16 @@ exports.SKEW_ASSET_PAYOFFS = {
 };
 exports.SKEW_TENOR_POLICY = {
     onChainBucketsDays: [1, 7, 14, 28, 90],
+    allowedTenorsByUnderlying: {
+        BTC: [1, 7, 14, 28, 90],
+        ETH: [1, 7, 14, 28, 90],
+        SOL: [1, 7, 14, 28, 90],
+        XRP: [7, 14, 28],
+        HYPE: [1, 7, 14, 28],
+    },
     toleranceSeconds: 3600,
     minimumBucketDays: 1,
-    note: "Live on-chain create/fill paths require expiry to land inside one of the standard asset tenor buckets, with ±1h tolerance. Sub-1d binaries are intentionally not enabled in the current deployment.",
+    note: "Live on-chain create/fill paths require expiry to land inside the asset's allowed tenor buckets, with +/-1h tolerance. BTC/ETH/SOL accept 1d/7d/14d/28d/90d; XRP accepts 7d/14d/28d; HYPE accepts 1d/7d/14d/28d. Sub-1d binaries are intentionally not enabled in the current deployment.",
 };
 exports.SKEW_COLLATERAL_RAILS = [
     {
