@@ -1,5 +1,6 @@
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 type SignableTransaction = Transaction | VersionedTransaction;
+import type { ClearingState, RejectionReason, TradeState } from "./types";
 export declare const INSTANT_RFQ_DEFAULT_RELAY_URL = "wss://skew-relay-devnet.fly.dev/subscribe";
 export declare const INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = 600;
 export declare const INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = 60000;
@@ -8,6 +9,16 @@ export declare const RELAY_PAYLOAD_LEN: 132;
 export declare class RfqWalletMessageSigningUnsupported extends Error {
     readonly code = "RFQ_WALLET_MESSAGE_SIGNING_UNSUPPORTED";
     constructor(cause?: unknown);
+}
+export declare class InstantRfqError extends Error {
+    readonly tradeState: TradeState;
+    readonly clearingState: ClearingState;
+    readonly rejectionReason: RejectionReason;
+    readonly raw?: Record<string, unknown>;
+    constructor(message: string, opts?: {
+        rejectionReason?: RejectionReason;
+        raw?: Record<string, unknown>;
+    });
 }
 export interface RelayPayload {
     relayNonce: bigint;
@@ -45,12 +56,25 @@ export interface InstantRfqQuote {
     premiumMicro: bigint;
     ttlSeconds: number | null;
     receivedAt: number | null;
+    tradeState?: Extract<TradeState, "QUOTE_RECEIVED">;
+    relayEventId?: string;
+    relaySequence?: number;
+    serverTimeMs?: number;
     raw: Record<string, unknown>;
 }
 export interface InstantRfqHitResult {
     relayNonce: bigint;
     txSignature: string;
     optionPda: string;
+    tradeState?: TradeState;
+    clearingState?: ClearingState;
+    pmBacked?: boolean;
+    pmGuarantee?: "guaranteed";
+    registryUpdated?: boolean;
+    rejectionReason?: RejectionReason;
+    relayEventId?: string;
+    relaySequence?: number;
+    serverTimeMs?: number;
     simulatedUnits?: number;
     premiumDestination?: string;
     autoPreparedAccounts?: string[];

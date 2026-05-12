@@ -44,6 +44,13 @@ const STRIKE_BANDS_BPS = {
     XRP: [5000, 15000],
     HYPE: [5500, 14500],
 };
+const STRIKE_STEP_USD = {
+    BTC: 250,
+    ETH: 10,
+    SOL: 1,
+    XRP: 0.01,
+    HYPE: 0.5,
+};
 const OPTION_TYPE_INDEX = {
     vanilla_call: 0,
     vanilla_put: 0,
@@ -112,6 +119,13 @@ function optionDirection(payoff, direction) {
     const mapped = (0, pda_1.mapPayoffToAnchor)(payoff);
     return (0, pda_1.directionToI8)(direction ?? mapped.defaultDirection);
 }
+function assertStrikeGrid(asset, strike, context) {
+    const step = STRIKE_STEP_USD[asset];
+    const units = strike / step;
+    if (Math.abs(units - Math.round(units)) > 1e-9) {
+        throw new Error(`${context}: ${asset} strike ${strike} is off-grid; use ${step >= 1 ? `$${step}` : `$${step.toFixed(2)}`} strike increments.`);
+    }
+}
 function amountFromUnits(units, decimals) {
     return Number(units) / 10 ** decimals;
 }
@@ -165,6 +179,69 @@ function isAlreadyInitializedError(err) {
     const text = err instanceof Error ? err.message : String(err);
     return text.includes("already in use") || text.includes("AccountAlreadyInitialized") || text.includes("idempotent_already_registered");
 }
+function isAlreadyFinalizedAuctionError(err) {
+    const text = err instanceof Error ? err.message : String(err);
+    return text.includes("AuctionNotOpen") || text.includes("already finalized") || text.includes("Closed") || text.includes("Settled");
+}
+async function waitForAuctionSnapshot(args) {
+    const deadline = Date.now() + args.timeoutMs;
+    let last = null;
+    while (Date.now() <= deadline) {
+        last = await args.skew.fetchRfqAuction(args.auction);
+        if (last) {
+            const quoteCount = last.bestQuoteMm ? 1 : 0;
+            if (quoteCount >= args.minQuotes)
+                return last;
+            if (!args.requireQuote && last.state !== "Open")
+                return last;
+        }
+        await sleep(Math.min(args.pollMs, Math.max(1, deadline - Date.now())));
+    }
+    if (!last) {
+        throw timeoutError("rfq.auctionAndFill auction registration readback", args.timeoutMs);
+    }
+    if (args.requireQuote && !last.bestQuoteMm) {
+        throw new Error("rfq.auctionAndFill: no on-chain Auction RFQ quote was received; refusing to fall back to the legacy pre-funded bridge. Start/register a maker, submit an auction quote, or use skew.rfq.request() for direct Instant PM fill.");
+    }
+    return last;
+}
+async function waitUntilAuctionClosable(args) {
+    const deadline = Date.now() + args.timeoutMs;
+    while (Date.now() <= deadline) {
+        const currentSlot = BigInt(await args.skew.solanaConnection.getSlot("confirmed"));
+        if (currentSlot >= args.snapshot.auctionCloseSlot)
+            return;
+        await sleep(Math.min(args.pollMs, Math.max(1, deadline - Date.now())));
+    }
+    throw timeoutError("rfq.auctionAndFill waiting for auction close_slot", args.timeoutMs);
+}
+async function waitForBestQuoteMatching(args) {
+    const deadline = Date.now() + args.timeoutMs;
+    while (Date.now() <= deadline) {
+        const candidates = args.session.quotesSeen.filter((quote) => {
+            if (args.maker && !quote.maker.equals(args.maker))
+                return false;
+            if (args.maxPremiumUnits !== undefined && quote.premiumUnits > args.maxPremiumUnits)
+                return false;
+            return true;
+        });
+        if (candidates.length > 0) {
+            if (args.settleMs && args.settleMs > 0)
+                await sleep(args.settleMs);
+            const settled = args.session.quotesSeen.filter((quote) => {
+                if (args.maker && !quote.maker.equals(args.maker))
+                    return false;
+                if (args.maxPremiumUnits !== undefined && quote.premiumUnits > args.maxPremiumUnits)
+                    return false;
+                return true;
+            });
+            return settled.reduce((best, quote) => (quote.premiumUnits < best.premiumUnits ? quote : best), settled[0]);
+        }
+        await sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+    }
+    const makerText = args.maker ? ` from maker ${args.maker.toBase58()}` : "";
+    throw new Error(`rfq.auctionAndFill: no matching Instant RFQ quote${makerText}; official Auction execution does not fall back to pre-funded settlement.`);
+}
 class SkewRfqClient {
     constructor(skew) {
         this.skew = skew;
@@ -178,6 +255,7 @@ class SkewRfqClient {
         const optionType = OPTION_TYPE_INDEX[payoff];
         if (optionType === undefined)
             throw new Error(`Unsupported RFQ payoff: ${payoff}`);
+        assertStrikeGrid(asset, args.strike, "rfq.request");
         const expiryTs = parseExpiry(args.expiry);
         (0, pda_1.assertExpiryTenor)(asset, expiryTs, { context: "rfq.request" });
         const settlementMint = resolveSettlementMint(this.skew, args.settlementMint);
@@ -268,6 +346,136 @@ class SkewRfqClient {
         const session = await this.request(args);
         return session.quotes();
     }
+    /**
+     * Official Auction RFQ execution wrapper.
+     *
+     * Auction RFQ is price discovery only: register, collect firm on-chain quotes,
+     * and finalize/refund escrow. The actual PM-backed option issuance is then
+     * forced through the Instant RFQ relay's `atomic_fill_from_relay` lane.
+     * This method intentionally refuses to fall back to the legacy pre-funded
+     * bridge when the auction or matching instant quote is missing.
+     */
+    async auctionAndFill(args) {
+        const built = await this.buildRequest(args);
+        if (!built.settlementMint.equals(this.skew.usdcMintPublicKey)) {
+            throw new Error("rfq.auctionAndFill: Auction RFQ v1 is USDC/stable-only; use direct rfq.request() for non-USDC settlement rails.");
+        }
+        const premiumCapUsd = args.maxPremiumUsd ?? args.maxPremium;
+        if (premiumCapUsd === undefined || !Number.isFinite(premiumCapUsd) || premiumCapUsd <= 0) {
+            throw new Error("rfq.auctionAndFill requires maxPremiumUsd/maxPremium so the auction escrow and Instant accept cap are explicit.");
+        }
+        const auctionId = args.auctionId ?? (0, pda_1.generateNonce)();
+        const durationSlots = BigInt(args.auctionDurationSlots ?? 30);
+        const pollMs = args.auctionPollMs ?? 750;
+        const auctionWaitMs = args.auctionWaitMs ?? Math.max(45000, Number(durationSlots) * 550 + 15000);
+        const minAuctionQuotes = args.minAuctionQuotes ?? 1;
+        const requireAuctionQuote = args.requireAuctionQuote !== false;
+        const requireInstantMakerMatchesAuction = args.requireInstantMakerMatchesAuction !== false;
+        const registered = await this.skew.registerRfqAuction({
+            auctionId,
+            optionSpec: built.optionSpec,
+            maxPremiumUsdc: premiumCapUsd,
+            durationSlots,
+            settlementMint: built.settlementMint,
+            isBlockTrade: args.isBlockTrade,
+            minimumSizeMicro: args.minimumSizeMicro,
+            eligibleMakerCount: args.eligibleMakerCount,
+        });
+        let snapshot = await this.skew.fetchRfqAuction(registered.auction);
+        await args.onAuctionRegistered?.({
+            auctionId,
+            auction: registered.auction,
+            escrow: registered.escrow,
+            registerTxSignature: registered.txSignature,
+            request: built,
+            snapshot,
+        });
+        snapshot = await waitForAuctionSnapshot({
+            skew: this.skew,
+            auction: registered.auction,
+            timeoutMs: auctionWaitMs,
+            pollMs,
+            minQuotes: minAuctionQuotes,
+            requireQuote: requireAuctionQuote,
+        });
+        let finalizeTxSignature = null;
+        if (args.finalizeAuction !== false) {
+            await waitUntilAuctionClosable({
+                skew: this.skew,
+                snapshot,
+                pollMs,
+                timeoutMs: auctionWaitMs,
+            });
+            try {
+                const finalized = await this.skew.finalizeRfqAuction({ auction: registered.auction });
+                finalizeTxSignature = finalized.txSignature;
+            }
+            catch (err) {
+                const afterError = await this.skew.fetchRfqAuction(registered.auction);
+                if (!afterError || afterError.state === "Open" || !isAlreadyFinalizedAuctionError(err)) {
+                    throw err;
+                }
+            }
+        }
+        const finalizedSnapshot = await this.skew.fetchRfqAuction(registered.auction);
+        const auctionQuoteMaker = finalizedSnapshot?.bestQuoteMm ?? snapshot.bestQuoteMm;
+        const auctionQuotePremiumMicro = finalizedSnapshot?.bestQuotePremiumMicro ?? snapshot.bestQuotePremiumMicro;
+        const auctionQuotePremiumUsd = auctionQuotePremiumMicro === null ? null : Number(auctionQuotePremiumMicro) / 1000000;
+        const instantPremiumCapUsd = auctionQuotePremiumUsd === null ? premiumCapUsd : Math.min(premiumCapUsd, auctionQuotePremiumUsd);
+        const instantPremiumCapUnits = BigInt(Math.round(instantPremiumCapUsd * 1000000));
+        const instantSession = await this.request({
+            ...args,
+            maxPremiumUsd: instantPremiumCapUsd,
+            quoteTimeoutMs: args.instantQuoteTimeoutMs ?? args.quoteTimeoutMs,
+        });
+        let fill;
+        try {
+            const quote = await waitForBestQuoteMatching({
+                session: instantSession,
+                maker: requireInstantMakerMatchesAuction ? auctionQuoteMaker : null,
+                maxPremiumUnits: instantPremiumCapUnits,
+                timeoutMs: args.instantQuoteTimeoutMs ?? args.quoteTimeoutMs ?? 60000,
+                settleMs: args.instantSettleMs ?? 500,
+            });
+            fill = await instantSession.accept(quote, {
+                maxPremiumUsd: instantPremiumCapUsd,
+                timeoutMs: args.instantHitTimeoutMs,
+            });
+        }
+        catch (err) {
+            instantSession.close();
+            throw err;
+        }
+        const readbackErrors = [...fill.readbackErrors];
+        if (fill.executionLane !== "instant_rfq_atomic_fill") {
+            readbackErrors.push(`unexpected fill lane ${fill.executionLane}`);
+        }
+        if (!fill.pmBacked || fill.pmGuarantee !== "guaranteed") {
+            readbackErrors.push("Instant PM fill did not return the guaranteed PM receipt");
+        }
+        return {
+            success: true,
+            executionLane: "auction_to_instant_pm_fill",
+            pmBacked: true,
+            pmGuarantee: "guaranteed",
+            auction: {
+                auctionId,
+                pda: registered.auction.toBase58(),
+                escrow: registered.escrow.toBase58(),
+                registerTxSignature: registered.txSignature,
+                finalizeTxSignature,
+                stateBeforeFill: snapshot.state,
+                stateAfterFinalize: finalizedSnapshot?.state ?? null,
+                bestQuoteMm: auctionQuoteMaker?.toBase58() ?? null,
+                bestQuotePremiumMicro: auctionQuotePremiumMicro,
+                bestQuotePremiumUsd: auctionQuotePremiumUsd,
+                usedAsInstantMakerFilter: requireInstantMakerMatchesAuction && auctionQuoteMaker !== null,
+            },
+            fill,
+            readbackOk: readbackErrors.length === 0,
+            readbackErrors,
+        };
+    }
     async validateMoneyness(asset, strike) {
         const oracle = await readOnChainOracleSpot(this.skew, asset);
         const [minBps, maxBps] = STRIKE_BANDS_BPS[asset];
@@ -303,6 +511,8 @@ class SkewRfqSession {
         this.waiters = [];
         this.endTimer = null;
         this.status = "open";
+        this.tradeState = "RFQ_REQUESTED";
+        this.clearingState = "NOT_APPLICABLE";
     }
     get relayNonce() {
         return this.relayNonceValue;
@@ -371,8 +581,10 @@ class SkewRfqSession {
                     }
                     if (kind === "quote_ack") {
                         const quote = this.parseQuote(msg);
-                        if (quote)
+                        if (quote) {
+                            this.tradeState = "QUOTE_RECEIVED";
                             this.pushQuote(quote);
+                        }
                         return;
                     }
                     if (kind === "fill_failed" || kind === "error") {
@@ -458,15 +670,28 @@ class SkewRfqSession {
                 (options.quoteExpirySeconds ?? this.options.quoteExpirySeconds ?? instant_rfq_1.INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS)),
             buyer: this.skew.walletPublicKey,
         });
-        const result = await (0, instant_rfq_1.hitInstantRfqQuoteTxSigned)({
-            buyer: this.skew.walletPublicKey,
-            cmPubkey: quote.maker,
-            payload,
-            relayUrl: this.options.relayUrl,
-            timeoutMs: options.timeoutMs ?? instant_rfq_1.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS,
-            signTransaction: (tx) => this.skew.signTransaction(tx),
-        });
+        this.tradeState = "ACCEPT_REQUESTED";
+        this.clearingState = "PENDING_CLEARING";
+        let result;
+        try {
+            result = await (0, instant_rfq_1.hitInstantRfqQuoteTxSigned)({
+                buyer: this.skew.walletPublicKey,
+                cmPubkey: quote.maker,
+                payload,
+                relayUrl: this.options.relayUrl,
+                timeoutMs: options.timeoutMs ?? instant_rfq_1.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS,
+                signTransaction: (tx) => this.skew.signTransaction(tx),
+            });
+        }
+        catch (err) {
+            this.tradeState = "REJECTED";
+            this.clearingState = "REJECTED";
+            this.fail(err instanceof Error ? err : new Error(String(err)));
+            throw err;
+        }
         this.status = "filled";
+        this.tradeState = result.tradeState ?? "FILLED";
+        this.clearingState = result.clearingState ?? "FILLED";
         this.close();
         let option = null;
         for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -504,9 +729,24 @@ class SkewRfqSession {
         const postLocked = postMakerCm?.totalPmLockedMicro ?? 0n;
         const delta = postLocked >= preLocked ? postLocked - preLocked : 0n;
         const notionalUnits = this.request.optionSpec.payoffAmountMicro;
+        const prePositionsCount = preMakerCm?.positionsCount ?? null;
+        const postPositionsCount = postMakerCm?.positionsCount ?? null;
+        const registryUpdated = makerHasShort &&
+            (prePositionsCount === null ||
+                postPositionsCount === null ||
+                postPositionsCount >= prePositionsCount + 1);
         return {
             success: true,
             executionLane: "instant_rfq_atomic_fill",
+            tradeState: result.tradeState ?? "FILLED",
+            clearingState: result.clearingState ?? "FILLED",
+            pmBacked: true,
+            pmGuarantee: "guaranteed",
+            registryUpdated,
+            rejectionReason: result.rejectionReason,
+            relayEventId: result.relayEventId,
+            relaySequence: result.relaySequence,
+            serverTimeMs: result.serverTimeMs,
             txSignature: result.txSignature,
             explorer: `https://explorer.solana.com/tx/${result.txSignature}?cluster=devnet`,
             optionPda: result.optionPda,
@@ -523,8 +763,8 @@ class SkewRfqSession {
                 postLastImUsd: postMakerCm ? Number(postMakerCm.lastImMicro) / 1000000 : null,
                 postLastImPctOfNotional: postMakerCm ? pctOf(postMakerCm.lastImMicro, notionalUnits) : null,
                 freeCollateralUsd: postMakerCm ? Number(postMakerCm.freeCollateralMicro) / 1000000 : null,
-                prePositionsCount: preMakerCm?.positionsCount ?? null,
-                postPositionsCount: postMakerCm?.positionsCount ?? null,
+                prePositionsCount,
+                postPositionsCount,
                 riskPreflight: result.riskPreflight,
             },
             portfolio: {
@@ -556,6 +796,7 @@ class SkewRfqSession {
         const premiumAmount = amountFromUnits(premiumUnits, this.request.settlementDecimals);
         return {
             id: `${relayNonce}:${maker}:${premiumUnits.toString()}`,
+            tradeState: "QUOTE_RECEIVED",
             relayNonce: BigInt(String(relayNonce)),
             maker: new web3_js_1.PublicKey(maker),
             makerBase58: maker,
@@ -568,6 +809,13 @@ class SkewRfqSession {
             receivedAt: msg["received_at"] === undefined || msg["received_at"] === null
                 ? Date.now()
                 : Number(msg["received_at"]),
+            relayEventId: typeof msg["event_id"] === "string" ? msg["event_id"] : undefined,
+            relaySequence: typeof msg["sequence"] === "number" && Number.isFinite(msg["sequence"])
+                ? msg["sequence"]
+                : undefined,
+            serverTimeMs: typeof msg["server_time_ms"] === "number" && Number.isFinite(msg["server_time_ms"])
+                ? msg["server_time_ms"]
+                : undefined,
             raw: serializeJson(msg),
         };
     }
@@ -609,6 +857,18 @@ class SkewRfqSession {
             return;
         this.closed = true;
         this.status = status;
+        if (status === "expired") {
+            this.tradeState = "EXPIRED";
+            this.clearingState = "NOT_APPLICABLE";
+        }
+        if (status === "cancelled") {
+            this.tradeState = "CANCELLED";
+            this.clearingState = "NOT_APPLICABLE";
+        }
+        if (status === "failed") {
+            this.tradeState = "REJECTED";
+            this.clearingState = "REJECTED";
+        }
         if (this.endTimer)
             clearTimeout(this.endTimer);
         try {

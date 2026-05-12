@@ -46,6 +46,23 @@ export type PayoffType = "digital_call" | "digital_put" | "vanilla_call" | "vani
  * (e.g. "digital_put" implies "sell").
  */
 export type Direction = "buy" | "sell";
+export type TradeState = "RFQ_REQUESTED" | "QUOTE_RECEIVED" | "ACCEPT_REQUESTED" | "PENDING_CLEARING" | "FILLED" | "REJECTED" | "EXPIRED" | "CANCELLED" | "TRANSFER_PENDING" | "TRANSFER_DELIVERED";
+export type ClearingState = "NOT_APPLICABLE" | "PENDING_CLEARING" | "FILLED" | "REJECTED";
+export type ExecutionLane = "instant_rfq_atomic_fill" | "auction_discovery" | "auction_terms_to_instant_rfq_atomic_fill" | "auction_to_instant_rfq_atomic_fill" | "prefunded_create_buy" | "secondary_transfer";
+export type PmGuarantee = "guaranteed" | "not_applicable" | "not_guaranteed" | "conditional_registry_tracking";
+export type RejectionReason = "INSUFFICIENT_COLLATERAL" | "MARGIN_CHECK_FAILED" | "MAKER_QUOTE_OFF" | "MMP_TRIGGERED" | "QUOTE_EXPIRED" | "ORACLE_STALE" | "ORACLE_CONFIDENCE_TOO_WIDE" | "PAYLOAD_SIGNATURE_INVALID" | "TX_TOO_LARGE" | "RPC_TIMEOUT" | "READBACK_FAILED" | "UNKNOWN";
+export interface TradeReadbackStatus {
+    tradeState: TradeState;
+    clearingState: ClearingState;
+    executionLane: ExecutionLane;
+    pmBacked: boolean;
+    pmGuarantee: PmGuarantee;
+    registryUpdated?: boolean;
+    rejectionReason?: RejectionReason;
+    relayEventId?: string;
+    relaySequence?: number;
+    serverTimeMs?: number;
+}
 export interface TxSimulationResult {
     /** True when the transaction simulation completed without an on-chain error. */
     ok: boolean;

@@ -3,7 +3,7 @@
 TypeScript SDK for Skew — the venue-only Solana on-chain OTC options
 protocol. Devnet launch-ready, audit-gated.
 
-Current package version: **0.7.5** (top-level snapshot under
+Current package version: **0.7.6** (top-level snapshot under
 [`/README.md`](../../README.md)). Generated from the Anchor 0.31.1 IDL of
 `skew-master` (123 ix · `skew_master.so` 2,398,832 B · devnet program
 `3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK`).
@@ -145,6 +145,8 @@ for await (const quote of rfq.quotes()) {
 const best = await rfq.waitForBestQuote({ timeoutMs: 60_000 });
 const fill = await rfq.accept(best, { maxPremiumUsd: 300 });
 
+console.log(fill.tradeState, fill.clearingState);
+console.log(fill.pmBacked, fill.pmGuarantee);
 console.log(fill.optionPda);
 console.log(fill.margin.pmLockedDeltaUsd);
 console.log(fill.margin.pmLockedDeltaPctOfNotional);
@@ -157,6 +159,33 @@ console.log(fill.portfolio.buyerHasLong, fill.portfolio.makerHasShort);
 quote_request -> quote_ack -> buyer_accept_tx_signed -> cm_sign
 -> buyer_tx_signed -> atomic_fill_from_relay
 ```
+
+If a workflow starts with on-chain Auction RFQ discovery, use
+`skew.rfq.auctionAndFill(...)` instead of manually calling the legacy
+quote-bound pre-funded bridge:
+
+```typescript
+const result = await skew.rfq.auctionAndFill({
+  asset: "BTC",
+  payoff: "vanilla_call",
+  strike: 82_000,
+  notional: 10_000,
+  expiry: "7d",
+  maxPremiumUsd: 300,
+});
+
+console.log(result.executionLane);          // "auction_to_instant_pm_fill"
+console.log(result.fill.executionLane);     // "instant_rfq_atomic_fill"
+console.log(result.fill.pmBacked);          // true
+console.log(result.fill.pmGuarantee);       // "guaranteed"
+console.log(result.fill.margin.pmLockedDeltaUsd);
+console.log(result.readbackOk);
+```
+
+`auctionAndFill` registers/finalizes the auction tape, then forces the actual
+option issuance through the Instant RFQ PM lane. If the auction quote or
+matching instant quote is missing, it fails closed and does not fall back to
+pre-funded settlement.
 
 The older `create() -> deposit_collateral -> buy()` path remains available as
 the fully-collateralized primitive, but it is not the official RFQ clearing
@@ -191,11 +220,35 @@ strike that is valid against live Hermes may still be rejected on devnet if it
 is outside the currently deployed frozen-Pyth strike band; the SDK returns a
 clear error before asking the wallet to sign.
 
+It also rejects off-grid strikes before signing:
+
+| Asset | Strike grid |
+|---|---:|
+| BTC | $250 |
+| ETH | $10 |
+| SOL | $1 |
+| XRP | $0.01 |
+| HYPE | $0.50 |
+
 Low-level functions remain exported for advanced integrations:
 `collectInstantRfqQuotes`, `buildRelayPayload`, and
 `hitInstantRfqQuoteTxSigned`.
 
 Canonical API contract: [`docs/api/official-rfq.md`](../../docs/api/official-rfq.md).
+
+### RFQ status fields
+
+The facade keeps the original return shape and adds normalized lifecycle
+readback for dashboards, MCP agents, and institutional demos:
+
+| Field | Meaning |
+|---|---|
+| `tradeState` | `RFQ_REQUESTED`, `QUOTE_RECEIVED`, `ACCEPT_REQUESTED`, `PENDING_CLEARING`, `FILLED`, `REJECTED`, `EXPIRED`, `CANCELLED`, `TRANSFER_PENDING`, or `TRANSFER_DELIVERED` |
+| `clearingState` | `NOT_APPLICABLE`, `PENDING_CLEARING`, `FILLED`, or `REJECTED` |
+| `pmBacked` / `pmGuarantee` | `true` / `"guaranteed"` only after successful Instant RFQ atomic fill |
+| `registryUpdated` | Maker short / CM registry readback moved after fill |
+| `rejectionReason` | Normalized machine reason for collateral, margin, quote, oracle, signature, tx-size, RPC, or readback failures |
+| `relayEventId` / `relaySequence` | Pointer into relay lifecycle readback |
 
 ---
 
@@ -358,11 +411,12 @@ PM walks.
 
 ### Escrow-aware RFQ auctions (5)
 
-Buyer escrows `max_premium_micro` USDC at `register`, browser MMs submit tx-signed quotes, bots/HSMs can submit Ed25519-signed quotes over the canonical 80-byte digest, and finalize is perm-less past `close_slot`. This is the auction/finalization lane, not 1-click HIT; immediate execution belongs to Instant RFQ above. The older single-MM `RfqAccount` path remains a full-collateral builder primitive for pre-funded listings.
+Buyer escrows `max_premium_micro` USDC at `register`, browser MMs submit tx-signed quotes, bots/HSMs can submit Ed25519-signed quotes over the canonical 80-byte digest, and finalize is perm-less past `close_slot`. This is the auction/finalization lane, not 1-click HIT; PM-backed execution belongs to Instant RFQ above. Use `skew.rfq.auctionAndFill()` when the user starts with Auction discovery but expects a PM-backed option.
 
 | Method | Anchor ix |
 |---|---|
 | `registerRfqMaker()` | `register_rfq_maker` (per-MM anti-spam deposit) |
+| `skew.rfq.auctionAndFill(...)` | high-level wrapper: auction discovery + finalize + Instant RFQ `atomic_fill_from_relay` |
 | `registerRfqAuction({ auctionId, optionSpec, maxPremiumUsdc, durationSlots })` | `register_rfq_auction` (buyer escrows USDC + opens N-MM window) |
 | `submitRfqQuoteDirect({ auction, premiumMicro, validUntilSlot })` | `submit_rfq_quote_tx_signed` — browser wallet lane; normal tx signature only, no `signMessage` |
 | `submitRfqQuoteSigned({ auction, premiumMicro, validUntilSlot, mmSignature })` | `submit_rfq_quote` — bot/HSM lane; builds 2-ix tx `[Ed25519Program.createInstructionWithPublicKey, submit_rfq_quote]` so the on-chain handler can verify the digest via the Instructions sysvar |

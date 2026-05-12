@@ -1,6 +1,6 @@
 # @skew-labs/sdk — examples
 
-Five end-to-end bot examples that run against devnet using nothing but the
+Six end-to-end bot examples that run against devnet using nothing but the
 SDK + a funded keypair. Each is < 100 lines and demonstrates one capability.
 
 | # | Example | Live status (Round 23 verified 2026-04-26) | What it does |
@@ -10,6 +10,8 @@ SDK + a funded keypair. Each is < 100 lines and demonstrates one capability.
 | 03 | [`arb-bot`](./03-arb-bot) | ✅ **Round 25 — runs end-to-end** (Pyth + external venue vol live; Skew `/price` in fallback mode) | External-venue ATM premium scanner |
 | 04 | [`settler-bot`](./04-settler-bot) | ✅ **Round 28** — direct anchor scan, layout-resilient, 170 OptionAccount discovered live | Auto-settle expired options |
 | 05 | [`delta-hedge-bot`](./05-delta-hedge-bot) | ❌ **REST `/v1/options/greeks` not deployed** + Jupiter integration stubbed | Portfolio delta-neutral maintenance |
+
+| 06 | [`auction-pm-fill`](./06-auction-pm-fill) | **Official PM path** | Auction RFQ discovery, maker firm quote, finalize, then Instant RFQ atomic PM fill |
 
 **Round 23 finding:** REST API endpoints under `/v1/*` are largely **not deployed
 yet** to the live `skew-pricing.fly.dev` server (returns 404 / empty). Only

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.RfqWalletMessageSigningUnsupported = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS = exports.INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = exports.INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = void 0;
+exports.InstantRfqError = exports.RfqWalletMessageSigningUnsupported = exports.RELAY_PAYLOAD_LEN = exports.INSTANT_RFQ_DEFAULT_HIT_TIMEOUT_MS = exports.INSTANT_RFQ_DEFAULT_COLLECT_TIMEOUT_MS = exports.INSTANT_RFQ_DEFAULT_QUOTE_EXPIRY_SECONDS = exports.INSTANT_RFQ_DEFAULT_RELAY_URL = void 0;
 exports.validateInstantRfqLane = validateInstantRfqLane;
 exports.buildRelayPayload = buildRelayPayload;
 exports.encodeRelayPayload = encodeRelayPayload;
@@ -36,6 +36,17 @@ class RfqWalletMessageSigningUnsupported extends Error {
     }
 }
 exports.RfqWalletMessageSigningUnsupported = RfqWalletMessageSigningUnsupported;
+class InstantRfqError extends Error {
+    constructor(message, opts = {}) {
+        super(message);
+        this.tradeState = "REJECTED";
+        this.clearingState = "REJECTED";
+        this.name = "InstantRfqError";
+        this.rejectionReason = opts.rejectionReason ?? "UNKNOWN";
+        this.raw = opts.raw;
+    }
+}
+exports.InstantRfqError = InstantRfqError;
 function validateInstantRfqLane(payload) {
     const mint = new web3_js_1.PublicKey(payload.settlementMint);
     const physicalSolSettlement = mint.equals(pda_1.JITOSOL_MINT) || mint.equals(pda_1.NATIVE_SOL_MINT);
@@ -217,6 +228,10 @@ async function collectInstantRfqQuotes(args) {
                 receivedAt: msg.received_at === undefined || msg.received_at === null
                     ? null
                     : Number(msg.received_at),
+                tradeState: "QUOTE_RECEIVED",
+                relayEventId: relayString(msg.event_id),
+                relaySequence: relayNumber(msg.sequence),
+                serverTimeMs: relayNumber(msg.server_time_ms),
                 raw: msg,
             });
             if (quotes.length >= maxQuotes) {
@@ -279,6 +294,9 @@ async function hitInstantRfqQuoteInternal(args) {
         let premiumDestination;
         let autoPreparedAccounts;
         let riskPreflight;
+        let relayEventId;
+        let relaySequence;
+        let serverTimeMs;
         const finishErr = (err) => {
             if (done)
                 return;
@@ -332,6 +350,15 @@ async function hitInstantRfqQuoteInternal(args) {
                     relayNonce: args.payload.relayNonce,
                     txSignature: String(msg.tx_sig ?? msg.txSignature ?? ""),
                     optionPda: String(msg.option_pda ?? msg.optionPda ?? ""),
+                    tradeState: relayTradeState(msg, "FILLED"),
+                    clearingState: relayClearingState(msg, "FILLED"),
+                    pmBacked: true,
+                    pmGuarantee: "guaranteed",
+                    registryUpdated: true,
+                    rejectionReason: relayRejectionReason(msg),
+                    relayEventId: relayString(msg.event_id ?? relayEventId),
+                    relaySequence: relayNumber(msg.sequence ?? relaySequence),
+                    serverTimeMs: relayNumber(msg.server_time_ms ?? serverTimeMs),
                     simulatedUnits,
                     premiumDestination,
                     autoPreparedAccounts,
@@ -340,9 +367,15 @@ async function hitInstantRfqQuoteInternal(args) {
             }
             if (msg.kind === "fill_failed") {
                 clearTimeout(timer);
-                finishErr(new Error(String(msg.reason ?? "instant RFQ fill failed")));
+                finishErr(new InstantRfqError(String(msg.reason ?? "instant RFQ fill failed"), {
+                    rejectionReason: relayRejectionReason(msg) ?? classifyInstantRfqRejection(msg.reason),
+                    raw: msg,
+                }));
             }
             if (msg.kind === "buyer_tx_request") {
+                relayEventId = relayString(msg.event_id);
+                relaySequence = relayNumber(msg.sequence);
+                serverTimeMs = relayNumber(msg.server_time_ms);
                 void (async () => {
                     try {
                         const txB64 = String(msg.tx_b64 ?? "");
@@ -441,6 +474,80 @@ function microPercentOf(value, denominator) {
     if (value === undefined || denominator === undefined || denominator <= 0n)
         return undefined;
     return Number(value) / Number(denominator) * 100;
+}
+function relayString(value) {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+function relayNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function relayTradeState(msg, fallback) {
+    const raw = msg.trade_state;
+    return isTradeState(raw) ? raw : fallback;
+}
+function relayClearingState(msg, fallback) {
+    const raw = msg.clearing_state;
+    return isClearingState(raw) ? raw : fallback;
+}
+function relayRejectionReason(msg) {
+    const raw = msg.rejection_reason;
+    return isRejectionReason(raw) ? raw : undefined;
+}
+function classifyInstantRfqRejection(reason) {
+    const text = String(reason ?? "").toLowerCase();
+    if (text.includes("insufficient") || text.includes("free collateral"))
+        return "INSUFFICIENT_COLLATERAL";
+    if (text.includes("margin") || text.includes("simulation_failed") || text.includes("preflight"))
+        return "MARGIN_CHECK_FAILED";
+    if (text.includes("quote_expired") || text.includes("expired"))
+        return "QUOTE_EXPIRED";
+    if (text.includes("sig") || text.includes("signature") || text.includes("digest"))
+        return "PAYLOAD_SIGNATURE_INVALID";
+    if (text.includes("too large") || text.includes("1232"))
+        return "TX_TOO_LARGE";
+    if (text.includes("timeout") || text.includes("timed out"))
+        return "RPC_TIMEOUT";
+    if (text.includes("oracle") && text.includes("confidence"))
+        return "ORACLE_CONFIDENCE_TOO_WIDE";
+    if (text.includes("oracle") || text.includes("pyth"))
+        return "ORACLE_STALE";
+    if (text.includes("mmp"))
+        return "MMP_TRIGGERED";
+    if (text.includes("quote_off"))
+        return "MAKER_QUOTE_OFF";
+    return "UNKNOWN";
+}
+function isTradeState(value) {
+    return (value === "RFQ_REQUESTED" ||
+        value === "QUOTE_RECEIVED" ||
+        value === "ACCEPT_REQUESTED" ||
+        value === "PENDING_CLEARING" ||
+        value === "FILLED" ||
+        value === "REJECTED" ||
+        value === "EXPIRED" ||
+        value === "CANCELLED" ||
+        value === "TRANSFER_PENDING" ||
+        value === "TRANSFER_DELIVERED");
+}
+function isClearingState(value) {
+    return (value === "NOT_APPLICABLE" ||
+        value === "PENDING_CLEARING" ||
+        value === "FILLED" ||
+        value === "REJECTED");
+}
+function isRejectionReason(value) {
+    return (value === "INSUFFICIENT_COLLATERAL" ||
+        value === "MARGIN_CHECK_FAILED" ||
+        value === "MAKER_QUOTE_OFF" ||
+        value === "MMP_TRIGGERED" ||
+        value === "QUOTE_EXPIRED" ||
+        value === "ORACLE_STALE" ||
+        value === "ORACLE_CONFIDENCE_TOO_WIDE" ||
+        value === "PAYLOAD_SIGNATURE_INVALID" ||
+        value === "TX_TOO_LARGE" ||
+        value === "RPC_TIMEOUT" ||
+        value === "READBACK_FAILED" ||
+        value === "UNKNOWN");
 }
 function base64ToBytes(s) {
     if (typeof Buffer !== "undefined") {
