@@ -3,7 +3,7 @@
 TypeScript SDK for Skew — the venue-only Solana on-chain OTC options
 protocol. Devnet launch-ready, audit-gated.
 
-Current package version: **0.7.8** (top-level snapshot under
+Current package version: **0.7.9** (top-level snapshot under
 [`/README.md`](../../README.md)). Generated from the Anchor 0.31.1 IDL of
 `skew-master` (123 ix · `skew_master.so` 2,398,832 B · devnet program
 `3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK`).
@@ -76,6 +76,48 @@ For scripts and bots, prefer an explicit devnet keypair path:
 export KEYPAIR_PATH=~/.config/solana/devnet.json
 # or in MCP/agent processes:
 export SKEW_KEYPAIR_PATH=~/.config/solana/devnet.json
+```
+
+## Evaluation Quickstart
+
+Use this as the first integration test on a new machine. It runs the
+recommended evaluation path:
+
+```txt
+Auction RFQ -> maker quote -> finalize -> Instant RFQ atomic fill -> PM readback
+```
+
+```bash
+git clone https://github.com/skew-labs/skew-sdk
+cd skew-sdk/examples/06-auction-pm-fill
+
+cp .env.example .env
+# edit HELIUS_RPC, BUYER_KEYPAIR, and MAKER_KEYPAIR in .env
+
+pnpm install
+pnpm start
+```
+
+The buyer and maker keypairs must hold devnet SOL. The buyer needs devnet USDC
+for `maxPremiumUsd`; the maker needs devnet USDC for CM collateral. The example
+chooses a strike from the same devnet Pyth preflight oracle used by live
+create/fill paths, so it does not accidentally pass Hermes pricing while
+failing the on-chain moneyness band.
+
+Expected receipt shape:
+
+```txt
+executionLane: instant_rfq_atomic_fill
+tradeState: FILLED
+clearingState: FILLED
+pmBacked: true
+pmGuarantee: guaranteed
+optionPda: <option PDA>
+pmLockedDeltaUsd: 28.58
+pmLockedDeltaPctOfNotional: 2.86
+buyerHasLong: true
+makerHasShort: true
+readbackOk: true
 ```
 
 ## Public margin labels

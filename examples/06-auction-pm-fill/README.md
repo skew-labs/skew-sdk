@@ -1,5 +1,8 @@
 # 06 - Auction RFQ to PM Fill
 
+Run this first when evaluating Skew from a clean machine. It is the official
+PM-backed RFQ demo path, not the legacy pre-funded bridge.
+
 This is the judge-style end-to-end path:
 
 1. Buyer opens an Auction RFQ.
@@ -23,5 +26,29 @@ pnpm install
 pnpm start
 ```
 
+You can also copy `.env.example` to `.env`; the script loads it automatically.
+
 The maker needs devnet SOL for the RFQ maker deposit and devnet USDC for CM
 collateral. The buyer needs enough USDC for `maxPremiumUsd`.
+
+## Expected output
+
+The exact PDA and transaction values change on every run. The important fields
+are the lifecycle and PM readback fields:
+
+```txt
+executionLane: instant_rfq_atomic_fill
+tradeState: FILLED
+clearingState: FILLED
+pmBacked: true
+pmGuarantee: guaranteed
+optionPda: <option PDA>
+pmLockedDeltaUsd: 28.58
+pmLockedDeltaPctOfNotional: 2.86
+buyerHasLong: true
+makerHasShort: true
+readbackOk: true
+```
+
+If no maker is running or a quote expires, the script fails closed. It does not
+fall back to `create_option_from_rfq_quote -> buy_option_from_rfq_quote`.

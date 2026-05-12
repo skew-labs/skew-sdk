@@ -8,8 +8,9 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
-    "@skew-labs/sdk": "workspace:*",
+    "@skew-labs/sdk": "^0.7.9",
     "@solana/web3.js": "^1.95.3",
+    "dotenv": "^16.4.7",
     "tsx": "^4.21.0",
     "tweetnacl": "^1.0.3"
   }
