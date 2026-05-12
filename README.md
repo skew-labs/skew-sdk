@@ -3,7 +3,7 @@
 TypeScript SDK for Skew — the venue-only Solana on-chain OTC options
 protocol. Devnet launch-ready, audit-gated.
 
-Current package version: **0.7.6** (top-level snapshot under
+Current package version: **0.7.7** (top-level snapshot under
 [`/README.md`](../../README.md)). Generated from the Anchor 0.31.1 IDL of
 `skew-master` (123 ix · `skew_master.so` 2,398,832 B · devnet program
 `3w2qSp1UnuTbTfdHPXxm3zZaz6JZRmPpbmHf56Y1DsgK`).
