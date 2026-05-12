@@ -461,6 +461,15 @@ the maker's exact `preImMicro -> postImMicro`, `requiredDeltaMicro`,
 MMP status, and position count. The same payload is pushed to CM bots over the
 relay WebSocket as `maker_margin_preview` before the buyer signs the final tx.
 
+For non-empty maker books, the relay requires a fresh `CmRiskCacheV1` on the
+hot path. If the cache is missing, stale, dirty, or has a registry-count
+mismatch, the relay refreshes it first and then builds the buyer transaction
+with `pmRiskCache` only. This prevents the large-book fallback where every
+existing OptionAccount is included in the buyer tx and the transaction can
+exceed Solana's size limit near 16 positions. The on-chain fill validates the
+cache again before using it, so the SDK should treat cache refresh as a
+transaction-size optimization with fail-closed safety, not as off-chain margin.
+
 CM bots must run one-time onboarding before quoting: `registerClearingMember(...)`
 and `initVolumeTracker()`. The relay can auto-create buyer-side first-use
 accounts in the buyer-signed transaction, but it cannot initialize a CM's
