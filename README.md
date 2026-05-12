@@ -112,6 +112,8 @@ tradeState: FILLED
 clearingState: FILLED
 pmBacked: true
 pmGuarantee: guaranteed
+auctionPda: <auction PDA>
+fillTx: <transaction signature>
 optionPda: <option PDA>
 pmLockedDeltaUsd: 28.58
 pmLockedDeltaPctOfNotional: 2.86
@@ -119,6 +121,22 @@ buyerHasLong: true
 makerHasShort: true
 readbackOk: true
 ```
+
+Known boundaries for reviewers:
+
+| Surface | Contract |
+|---|---|
+| Official PM path | `skew.rfq.request() -> waitForBestQuote() -> accept()` and `skew.rfq.auctionAndFill()` settle through Instant RFQ `atomic_fill_from_relay`. |
+| Auction finalize | Discovery only; it does not mint the option by itself. |
+| Legacy/pre-funded | `create() -> buy()` and quote-bound bridge helpers are full-collateral primitives, not the official PM demo path. |
+| Terminal | RFQ Tape and Secondary Tape discovery only; SDK/MCP execute trades. |
+
+Verification snapshot:
+
+- Pricing, Greeks, and PM preview matrix: 175/175 pass.
+- Live RFQ request/build matrix: 159/159 pass.
+- Expected local tenor rejects: 16/16 correctly rejected.
+- Representative devnet Auction -> Instant PM fill: pass with PM readback.
 
 ## Public margin labels
 
@@ -276,7 +294,8 @@ Low-level functions remain exported for advanced integrations:
 `collectInstantRfqQuotes`, `buildRelayPayload`, and
 `hitInstantRfqQuoteTxSigned`.
 
-Canonical API contract: [`docs/api/official-rfq.md`](../../docs/api/official-rfq.md).
+Canonical API contract:
+[`docs/api/official-rfq.md`](https://github.com/skew-labs/skew/blob/main/skew/docs/api/official-rfq.md).
 
 ### RFQ status fields
 

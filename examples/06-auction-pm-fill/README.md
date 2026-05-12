@@ -37,14 +37,22 @@ The exact PDA and transaction values change on every run. The important fields
 are the lifecycle and PM readback fields:
 
 ```txt
+auctionPda: <auction PDA>
+makerQuoteId: <quote id>
 executionLane: instant_rfq_atomic_fill
 tradeState: FILLED
 clearingState: FILLED
 pmBacked: true
 pmGuarantee: guaranteed
+fillTx: <transaction signature>
 optionPda: <option PDA>
+buyerPubkey: <buyer pubkey>
+makerPubkey: <maker pubkey>
+notionalUsd: 1000
 pmLockedDeltaUsd: 28.58
 pmLockedDeltaPctOfNotional: 2.86
+postLastImUsd: 28.58
+postLastImPctOfNotional: 2.86
 buyerHasLong: true
 makerHasShort: true
 readbackOk: true
@@ -52,3 +60,10 @@ readbackOk: true
 
 If no maker is running or a quote expires, the script fails closed. It does not
 fall back to `create_option_from_rfq_quote -> buy_option_from_rfq_quote`.
+
+## Regression snapshot
+
+- Pricing, Greeks, and PM preview matrix: 175/175 pass.
+- Live RFQ request/build matrix: 159/159 pass.
+- Expected local tenor rejects: 16/16 correctly rejected.
+- Representative devnet Auction -> Instant PM fill: pass with PM readback.
