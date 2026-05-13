@@ -1,5 +1,13 @@
 # @skew-labs/sdk changelog
 
+## 0.7.11 - 2026-05-13
+
+Public documentation sync:
+
+- Current package version in README now matches npm.
+- Release notes no longer describe the package as staged or operator-gated.
+- PM-cache hot-path wording stays aligned with the relay docs.
+
 ## 0.5.0 — 2026-05-09
 
 W22-W30 surface delivery + post-redeploy regen.
